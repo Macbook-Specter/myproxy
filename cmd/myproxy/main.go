@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"myproxy.com/p/internal/sockes5"
+	"myproxy.com/p/internal/socks5"
 )
 
 // -----------------------------------------------------
@@ -17,7 +17,7 @@ import (
 // -----------------------------------------------------
 
 // testTCP 演示 SOCKS5 TCP CONNECT 功能 (用于 HTTP GET 请求)
-func testTCP(client *sockes5.SOCKS5Client, targetAddr string) {
+func testTCP(client *socks5.SOCKS5Client, targetAddr string) {
 	log.Printf("\n--- [测试 1: TCP CONNECT] ---")
 	log.Printf("目标: %s", targetAddr)
 
@@ -65,7 +65,7 @@ func BuildUDPPacket(targetAddr string, data []byte) ([]byte, error) {
 	buf := bytes.NewBuffer([]byte{0x00, 0x00, 0x00})
 
 	// 目标地址类型和值
-	buf.WriteByte(sockes5.ATypDomain)
+	buf.WriteByte(socks5.ATypDomain)
 	buf.WriteByte(byte(len(host)))
 	buf.WriteString(host)
 
@@ -80,7 +80,7 @@ func BuildUDPPacket(targetAddr string, data []byte) ([]byte, error) {
 }
 
 // testUDP 演示 SOCKS5 UDP ASSOCIATE 功能 (用于 DNS 查询)
-func testUDP(client *sockes5.SOCKS5Client, targetDNSAddr string) {
+func testUDP(client *socks5.SOCKS5Client, targetDNSAddr string) {
 	log.Printf("\n--- [测试 2: UDP ASSOCIATE] ---")
 	log.Printf("目标 DNS 服务器: %s", targetDNSAddr)
 
@@ -159,7 +159,7 @@ func testUDP(client *sockes5.SOCKS5Client, targetDNSAddr string) {
 
 func main() {
 	// 假设你的 SOCKS5 代理运行在本地 1080 端口
-	client := &sockes5.SOCKS5Client{
+	client := &socks5.SOCKS5Client{
 		ProxyAddr: "127.0.0.1:1080",
 		Username:  "", // 如果代理需要认证，在此填写
 		Password:  "", // 如果代理需要认证，在此填写
