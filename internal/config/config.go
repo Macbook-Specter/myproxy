@@ -22,45 +22,46 @@ type Server struct {
 
 // ForwardRule 定义单个转发规则
 type ForwardRule struct {
-	ID          string `json:"id"`          // 规则唯一标识
-	Enabled     bool   `json:"enabled"`     // 是否启用
-	Protocol    string `json:"protocol"`    // 协议类型 ("tcp" 或 "udp")
-	LocalAddr   string `json:"localAddr"`   // 本地监听地址
-	RemoteAddr  string `json:"remoteAddr"`  // 远程目标地址
+	ID         string `json:"id"`         // 规则唯一标识
+	Enabled    bool   `json:"enabled"`    // 是否启用
+	Protocol   string `json:"protocol"`   // 协议类型 ("tcp" 或 "udp")
+	LocalAddr  string `json:"localAddr"`  // 本地监听地址
+	RemoteAddr string `json:"remoteAddr"` // 远程目标地址
 }
 
 // Config 定义配置文件结构
 type Config struct {
-	ProxyAddr         string        `json:"proxyAddr"`         // SOCKS5代理服务器地址
-	Username          string        `json:"username"`          // 认证用户名
-	Password          string        `json:"password"`          // 认证密码
-	ForwardRules      []ForwardRule `json:"forwardRules"`      // 转发规则列表
-	SubscriptionURL   string        `json:"subscriptionURL"`   // 订阅URL
-	Servers           []Server      `json:"servers"`           // 服务器列表
-	SelectedServerID  string        `json:"selectedServerID"`  // 当前选中的服务器ID
-	AutoProxyEnabled  bool          `json:"autoProxyEnabled"`  // 自动代理是否启用
-	AutoProxyPort     int           `json:"autoProxyPort"`     // 自动代理监听端口
-	AutoSetSystemProxy bool         `json:"autoSetSystemProxy"` // 是否自动设置系统代理
-	LogLevel          string        `json:"logLevel"`          // 日志级别
-	LogFile           string        `json:"logFile"`           // 日志文件路径
+	ProxyAddr             string        `json:"proxyAddr"`             // SOCKS5代理服务器地址
+	Username              string        `json:"username"`              // 认证用户名
+	Password              string        `json:"password"`              // 认证密码
+	ForwardRules          []ForwardRule `json:"forwardRules"`          // 转发规则列表
+	SubscriptionURL       string        `json:"subscriptionURL"`       // 订阅URL
+	Servers               []Server      `json:"servers"`               // 服务器列表
+	SelectedServerID      string        `json:"selectedServerID"`      // 当前选中的服务器ID
+	AutoProxyEnabled      bool          `json:"autoProxyEnabled"`      // 自动代理是否启用
+	AutoProxyPort         int           `json:"autoProxyPort"`         // 自动代理监听端口
+	AutoSetSystemProxy    bool          `json:"autoSetSystemProxy"`    // 是否自动设置系统代理
+	LogLevel              string        `json:"logLevel"`              // 日志级别
+	LogFile               string        `json:"logFile"`               // 日志文件路径
+	ServerListSplitOffset float64       `json:"serverListSplitOffset"` // 服务器列表和日志区域的分割位置 (0.0-1.0)
 }
 
 // DefaultConfig 返回默认配置
 func DefaultConfig() *Config {
 	return &Config{
-		ProxyAddr:         "127.0.0.1:1080",
-		AutoProxyEnabled:  false,
-		AutoProxyPort:     1080,
+		ProxyAddr:          "127.0.0.1:1080",
+		AutoProxyEnabled:   false,
+		AutoProxyPort:      1080,
 		AutoSetSystemProxy: false,
-		LogLevel:          "info",
-		LogFile:           "myproxy.log",
+		LogLevel:           "info",
+		LogFile:            "myproxy.log",
 		ForwardRules: []ForwardRule{
 			{
-				ID:          "default-tcp",
-				Enabled:     true,
-				Protocol:    "tcp",
-				LocalAddr:   "127.0.0.1:8080",
-				RemoteAddr:  "example.com:80",
+				ID:         "default-tcp",
+				Enabled:    true,
+				Protocol:   "tcp",
+				LocalAddr:  "127.0.0.1:8080",
+				RemoteAddr: "example.com:80",
 			},
 		},
 		Servers: []Server{
@@ -76,7 +77,8 @@ func DefaultConfig() *Config {
 				Enabled:  true,
 			},
 		},
-		SelectedServerID: "default-server",
+		SelectedServerID:      "default-server",
+		ServerListSplitOffset: 0.7, // 默认服务器列表占70%
 	}
 }
 

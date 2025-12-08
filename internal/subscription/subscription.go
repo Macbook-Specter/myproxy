@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"myproxy.com/p/internal/config"
+	"myproxy.com/p/internal/database"
 	"myproxy.com/p/internal/server"
 )
 
@@ -32,7 +33,8 @@ func NewSubscriptionManager(serverManager *server.ServerManager) *SubscriptionMa
 }
 
 // FetchSubscription 从URL获取订阅服务器列表
-func (sm *SubscriptionManager) FetchSubscription(url string) ([]config.Server, error) {
+// label 参数用于为订阅添加标签，如果为空则使用默认标签
+func (sm *SubscriptionManager) FetchSubscription(url string, label ...string) ([]config.Server, error) {
 	// 发送HTTP请求获取订阅内容
 	resp, err := sm.client.Get(url)
 	if err != nil {
@@ -52,32 +54,83 @@ func (sm *SubscriptionManager) FetchSubscription(url string) ([]config.Server, e
 		return nil, fmt.Errorf("解析订阅失败: %w", err)
 	}
 
+	// 保存订阅到数据库
+	subscriptionLabel := ""
+	if len(label) > 0 && label[0] != "" {
+		subscriptionLabel = label[0]
+	}
+
+	sub, err := database.AddOrUpdateSubscription(url, subscriptionLabel)
+	if err != nil {
+		return nil, fmt.Errorf("保存订阅到数据库失败: %w", err)
+	}
+
+	// 保存服务器到数据库
+	var subscriptionID *int64
+	if sub != nil {
+		subscriptionID = &sub.ID
+	}
+
+	for _, s := range servers {
+		if err := database.AddOrUpdateServer(s, subscriptionID); err != nil {
+			return nil, fmt.Errorf("保存服务器到数据库失败: %w", err)
+		}
+	}
+
 	return servers, nil
 }
 
 // UpdateSubscription 更新订阅
-func (sm *SubscriptionManager) UpdateSubscription(url string) error {
-	// 获取订阅服务器列表
-	servers, err := sm.FetchSubscription(url)
+// label 参数用于更新订阅标签，如果为空则保持原有标签
+func (sm *SubscriptionManager) UpdateSubscription(url string, label ...string) error {
+	// 获取订阅服务器列表（会自动保存到数据库）
+	subscriptionLabel := ""
+	if len(label) > 0 && label[0] != "" {
+		subscriptionLabel = label[0]
+	} else {
+		// 如果未提供标签，尝试从数据库获取现有标签
+		existingSub, err := database.GetSubscriptionByURL(url)
+		if err == nil && existingSub != nil {
+			subscriptionLabel = existingSub.Label
+		}
+	}
+
+	servers, err := sm.FetchSubscription(url, subscriptionLabel)
 	if err != nil {
 		return err
 	}
 
-	// 更新服务器列表
+	// 获取订阅信息
+	sub, err := database.GetSubscriptionByURL(url)
+	if err != nil {
+		return fmt.Errorf("获取订阅信息失败: %w", err)
+	}
+
+	var subscriptionID *int64
+	if sub != nil {
+		subscriptionID = &sub.ID
+	}
+
+	// 更新服务器列表（同时更新内存和数据库）
 	for _, s := range servers {
-		// 检查服务器是否已存在
-		existingServer, err := sm.serverManager.GetServer(s.ID)
+		// 检查服务器是否已存在（从数据库）
+		existingServer, err := database.GetServer(s.ID)
 		if err == nil {
-			// 服务器已存在，保留选中状态
+			// 服务器已存在，保留选中状态和延迟
 			s.Selected = existingServer.Selected
-			// 更新服务器信息
-			if err := sm.serverManager.UpdateServer(s); err != nil {
-				return err
-			}
-		} else {
-			// 服务器不存在，添加到列表
+			s.Delay = existingServer.Delay
+		}
+
+		// 更新数据库中的服务器信息
+		if err := database.AddOrUpdateServer(s, subscriptionID); err != nil {
+			return fmt.Errorf("更新服务器到数据库失败: %w", err)
+		}
+
+		// 同时更新内存中的服务器信息（保持兼容性）
+		if err := sm.serverManager.UpdateServer(s); err != nil {
+			// 如果内存中不存在，则添加
 			if err := sm.serverManager.AddServer(s); err != nil {
-				return err
+				return fmt.Errorf("更新服务器到内存失败: %w", err)
 			}
 		}
 	}
@@ -152,7 +205,7 @@ func (sm *SubscriptionManager) parseSubscription(content string) ([]config.Serve
 					continue
 				}
 			}
-			
+
 			// 解析JSON
 			var vmessConfig struct {
 				Add  string `json:"add"`
@@ -165,17 +218,17 @@ func (sm *SubscriptionManager) parseSubscription(content string) ([]config.Serve
 				Tls  string `json:"tls"`
 				Ps   string `json:"ps"`
 			}
-			
+
 			if err := json.Unmarshal(decoded, &vmessConfig); err != nil {
 				continue
 			}
-			
+
 			// 将port转换为整数
 			port, err := strconv.Atoi(vmessConfig.Port)
 			if err != nil {
 				continue
 			}
-			
+
 			// 创建服务器配置
 			s := config.Server{
 				ID:       server.GenerateServerID(vmessConfig.Add, port, vmessConfig.Id),

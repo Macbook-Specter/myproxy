@@ -54,6 +54,11 @@ type Logger struct {
 	logDir      string
 }
 
+const (
+	// MaxLogFileSize 单个日志文件最大大小（10MB）
+	MaxLogFileSize int64 = 10 * 1024 * 1024
+)
+
 // NewLogger 创建新的日志记录器
 func NewLogger(logFilePath string, console bool, level string) (*Logger, error) {
 	// 解析日志级别
@@ -81,23 +86,85 @@ func NewLogger(logFilePath string, console bool, level string) (*Logger, error) 
 		return nil, fmt.Errorf("创建日志目录失败: %w", err)
 	}
 
-	// 打开应用日志文件（追加模式）
+	// 打开应用日志文件，启动时如果存在则归档
 	appLogPath := fmt.Sprintf("%s/%s_%s.log", logDir, baseName, LogTypeApp)
-	appFile, err := os.OpenFile(appLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err := logger.archiveIfExists(appLogPath); err != nil {
+		return nil, fmt.Errorf("归档应用日志文件失败: %w", err)
+	}
+	appFile, err := os.OpenFile(appLogPath, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("打开应用日志文件失败: %w", err)
 	}
 	logger.files[LogTypeApp] = appFile
 
-	// 打开代理日志文件（追加模式）
+	// 打开代理日志文件，启动时如果存在则归档
 	proxyLogPath := fmt.Sprintf("%s/%s_%s.log", logDir, baseName, LogTypeProxy)
-	proxyFile, err := os.OpenFile(proxyLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err := logger.archiveIfExists(proxyLogPath); err != nil {
+		return nil, fmt.Errorf("归档代理日志文件失败: %w", err)
+	}
+	proxyFile, err := os.OpenFile(proxyLogPath, os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("打开代理日志文件失败: %w", err)
 	}
 	logger.files[LogTypeProxy] = proxyFile
 
 	return logger, nil
+}
+
+// archiveIfExists 如果日志文件存在则归档（启动时使用）
+func (l *Logger) archiveIfExists(logPath string) error {
+	// 检查文件是否存在
+	fileInfo, err := os.Stat(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// 文件不存在，不需要归档
+			return nil
+		}
+		return err
+	}
+
+	// 如果文件存在且大小大于0，则归档
+	if fileInfo.Size() > 0 {
+		timestamp := time.Now().Format("20060102_150405")
+		backupPath := fmt.Sprintf("%s.%s", logPath, timestamp)
+
+		// 重命名文件为归档文件
+		if err := os.Rename(logPath, backupPath); err != nil {
+			return fmt.Errorf("归档日志文件失败: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// rotateIfNeeded 检查日志文件大小，如果超过阈值则归档（运行时使用）
+func (l *Logger) rotateIfNeeded(logPath string) error {
+	// 检查文件是否存在
+	fileInfo, err := os.Stat(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// 文件不存在，不需要归档
+			return nil
+		}
+		return err
+	}
+
+	// 检查文件大小
+	if fileInfo.Size() < MaxLogFileSize {
+		// 文件大小未超过阈值，不需要归档
+		return nil
+	}
+
+	// 文件大小超过阈值，进行归档
+	timestamp := time.Now().Format("20060102_150405")
+	backupPath := fmt.Sprintf("%s.%s", logPath, timestamp)
+
+	// 重命名文件为归档文件
+	if err := os.Rename(logPath, backupPath); err != nil {
+		return fmt.Errorf("归档日志文件失败: %w", err)
+	}
+
+	return nil
 }
 
 // parseLogLevel 解析日志级别字符串
@@ -269,7 +336,7 @@ func (l *Logger) Rotate() error {
 
 		// 构建当前日志文件路径
 		logPath := fmt.Sprintf("%s/%s_%s.log", l.logDir, baseName, logType)
-		
+
 		// 备份当前日志文件
 		if _, err := os.Stat(logPath); err == nil {
 			backupPath := fmt.Sprintf("%s.%s", logPath, timestamp)
@@ -302,13 +369,13 @@ func (l *Logger) GetLogs(lines int) ([]string, error) {
 	logTypes := []LogType{LogTypeApp, LogTypeProxy}
 	for _, logType := range logTypes {
 		logPath := fmt.Sprintf("%s/%s_%s.log", l.logDir, baseName, logType)
-		
+
 		// 打开日志文件
 		file, err := os.Open(logPath)
 		if err != nil {
 			continue // 忽略不存在的文件
 		}
-		
+
 		// 读取文件内容
 		content, err := io.ReadAll(file)
 		file.Close()

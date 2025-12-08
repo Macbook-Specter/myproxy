@@ -1,0 +1,193 @@
+package ui
+
+import (
+	"fyne.io/fyne/v2"
+)
+
+// CustomBorderLayout 自定义 Border 布局，支持百分比控制
+type CustomBorderLayout struct {
+	topHeightPercent    float64 // 顶部高度百分比 (0.0-1.0)
+	bottomHeightPercent float64 // 底部高度百分比 (0.0-1.0)
+}
+
+// NewCustomBorderLayout 创建自定义 Border 布局
+func NewCustomBorderLayout(topPercent, bottomPercent float64) *CustomBorderLayout {
+	return &CustomBorderLayout{
+		topHeightPercent:    topPercent,
+		bottomHeightPercent: bottomPercent,
+	}
+}
+
+// Layout 实现布局方法
+func (c *CustomBorderLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	if len(objects) != 5 {
+		return // Border 布局需要 5 个对象：top, bottom, left, right, center
+	}
+
+	top := objects[0]
+	bottom := objects[1]
+	left := objects[2]
+	right := objects[3]
+	center := objects[4]
+
+	// 计算顶部和底部的高度（严格按照百分比）
+	topHeight := size.Height * float32(c.topHeightPercent)
+	bottomHeight := size.Height * float32(c.bottomHeightPercent)
+
+	// 确保顶部最小高度
+	if top != nil && top.Visible() {
+		minTopHeight := top.MinSize().Height
+		if topHeight < minTopHeight && minTopHeight < size.Height*0.3 {
+			topHeight = minTopHeight
+		}
+	}
+
+	// 底部区域必须严格按照百分比显示，确保始终可见
+	// 优先使用百分比计算的高度，但确保至少有一个最小可见高度
+	if bottom != nil {
+		// 强制显示底部区域
+		if !bottom.Visible() {
+			bottom.Show()
+		}
+
+		// 计算出的百分比高度
+		calculatedBottomHeight := size.Height * float32(c.bottomHeightPercent)
+
+		// 使用计算出的百分比高度，但确保至少50像素（确保内容可见）
+		bottomHeight = calculatedBottomHeight
+		if bottomHeight < 50 {
+			bottomHeight = 50
+		}
+
+		// 确保不会超出窗口范围
+		maxBottomHeight := size.Height - topHeight - 10 // 留10像素缓冲
+		if bottomHeight > maxBottomHeight && maxBottomHeight > 0 {
+			bottomHeight = maxBottomHeight
+		}
+
+		// 再次确保最小高度
+		if bottomHeight < 50 {
+			bottomHeight = 50
+		}
+	}
+
+	// 计算左侧和右侧的宽度
+	leftWidth := float32(0)
+	rightWidth := float32(0)
+	if left != nil && left.Visible() {
+		leftWidth = left.MinSize().Width
+	}
+	if right != nil && right.Visible() {
+		rightWidth = right.MinSize().Width
+	}
+
+	// 计算中间区域的大小
+	centerWidth := size.Width - leftWidth - rightWidth
+	centerHeight := size.Height - topHeight - bottomHeight
+
+	// 确保中间区域高度至少为0（防止负数）
+	if centerHeight < 0 {
+		centerHeight = 0
+	}
+
+	// 布局顶部
+	if top != nil && top.Visible() {
+		top.Resize(fyne.NewSize(size.Width, topHeight))
+		top.Move(fyne.NewPos(0, 0))
+	}
+
+	// 布局底部 - 确保始终可见
+	if bottom != nil {
+		// 强制显示底部区域，即使不可见也显示
+		if !bottom.Visible() {
+			bottom.Show()
+		}
+
+		// 确保底部高度至少为计算出的百分比高度
+		calculatedBottomHeight := size.Height * float32(c.bottomHeightPercent)
+		if bottomHeight < calculatedBottomHeight {
+			bottomHeight = calculatedBottomHeight
+		}
+		// 确保最小可见高度（至少50像素，确保内容可见）
+		if bottomHeight < 50 {
+			bottomHeight = 50
+		}
+		// 确保不会超出窗口范围
+		if bottomHeight > size.Height-topHeight {
+			bottomHeight = size.Height - topHeight - 10 // 留10像素缓冲
+		}
+		// 确保底部高度至少为50像素
+		if bottomHeight < 50 {
+			bottomHeight = 50
+		}
+		bottom.Resize(fyne.NewSize(size.Width, bottomHeight))
+		bottom.Move(fyne.NewPos(0, size.Height-bottomHeight))
+	}
+
+	// 布局左侧
+	if left != nil && left.Visible() {
+		left.Resize(fyne.NewSize(leftWidth, centerHeight))
+		left.Move(fyne.NewPos(0, topHeight))
+	}
+
+	// 布局右侧
+	if right != nil && right.Visible() {
+		right.Resize(fyne.NewSize(rightWidth, centerHeight))
+		right.Move(fyne.NewPos(size.Width-rightWidth, topHeight))
+	}
+
+	// 布局中间
+	if center != nil && center.Visible() {
+		center.Resize(fyne.NewSize(centerWidth, centerHeight))
+		center.Move(fyne.NewPos(leftWidth, topHeight))
+	}
+}
+
+// MinSize 计算最小尺寸
+func (c *CustomBorderLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	if len(objects) != 5 {
+		return fyne.NewSize(0, 0)
+	}
+
+	top := objects[0]
+	bottom := objects[1]
+	left := objects[2]
+	right := objects[3]
+	center := objects[4]
+
+	minWidth := float32(0)
+	minHeight := float32(0)
+
+	// 顶部最小高度
+	if top != nil && top.Visible() {
+		minHeight += top.MinSize().Height
+		minWidth = fyne.Max(minWidth, top.MinSize().Width)
+	}
+
+	// 底部最小高度
+	if bottom != nil && bottom.Visible() {
+		minHeight += bottom.MinSize().Height
+		minWidth = fyne.Max(minWidth, bottom.MinSize().Width)
+	}
+
+	// 左侧和右侧宽度
+	leftRightWidth := float32(0)
+	if left != nil && left.Visible() {
+		leftRightWidth += left.MinSize().Width
+	}
+	if right != nil && right.Visible() {
+		leftRightWidth += right.MinSize().Width
+	}
+
+	// 中间区域最小尺寸
+	centerMinSize := fyne.NewSize(0, 0)
+	if center != nil && center.Visible() {
+		centerMinSize = center.MinSize()
+	}
+
+	// 总最小宽度和高度
+	totalWidth := fyne.Max(minWidth, centerMinSize.Width+leftRightWidth)
+	totalHeight := minHeight + centerMinSize.Height
+
+	return fyne.NewSize(totalWidth, totalHeight)
+}

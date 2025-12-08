@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"myproxy.com/p/internal/config"
+	"myproxy.com/p/internal/database"
 )
 
 // ServerManager 服务器管理器
@@ -23,12 +24,32 @@ func NewServerManager(config *config.Config) *ServerManager {
 
 // AddServer 添加服务器
 func (sm *ServerManager) AddServer(server config.Server) error {
-	return sm.config.AddServer(server)
+	// 先添加到内存配置
+	if err := sm.config.AddServer(server); err != nil {
+		return err
+	}
+
+	// 添加到数据库（subscription_id 为 nil，表示手动添加的服务器）
+	if err := database.AddOrUpdateServer(server, nil); err != nil {
+		return fmt.Errorf("添加服务器到数据库失败: %w", err)
+	}
+
+	return nil
 }
 
 // RemoveServer 删除服务器
 func (sm *ServerManager) RemoveServer(id string) error {
-	return sm.config.RemoveServer(id)
+	// 先从内存配置删除
+	if err := sm.config.RemoveServer(id); err != nil {
+		return err
+	}
+
+	// 从数据库删除
+	if err := database.DeleteServer(id); err != nil {
+		return fmt.Errorf("从数据库删除服务器失败: %w", err)
+	}
+
+	return nil
 }
 
 // GetServer 获取服务器
@@ -53,6 +74,7 @@ func (sm *ServerManager) GetSelectedServer() (*config.Server, error) {
 
 // UpdateServer 更新服务器信息
 func (sm *ServerManager) UpdateServer(server config.Server) error {
+	// 先更新内存配置
 	for i, s := range sm.config.Servers {
 		if s.ID == server.ID {
 			sm.config.Servers[i] = server
@@ -60,6 +82,13 @@ func (sm *ServerManager) UpdateServer(server config.Server) error {
 			if server.ID == sm.config.SelectedServerID {
 				sm.config.Servers[i].Selected = true
 			}
+
+			// 更新数据库（保留原有的 subscription_id）
+			// 使用 nil 作为 subscriptionID，AddOrUpdateServer 会自动保持原有的 subscription_id
+			if err := database.AddOrUpdateServer(server, nil); err != nil {
+				return fmt.Errorf("更新服务器到数据库失败: %w", err)
+			}
+
 			return nil
 		}
 	}
@@ -69,9 +98,16 @@ func (sm *ServerManager) UpdateServer(server config.Server) error {
 
 // UpdateServerDelay 更新服务器延迟
 func (sm *ServerManager) UpdateServerDelay(id string, delay int) error {
+	// 先更新内存配置
 	for i, s := range sm.config.Servers {
 		if s.ID == id {
 			sm.config.Servers[i].Delay = delay
+
+			// 更新数据库
+			if err := database.UpdateServerDelay(id, delay); err != nil {
+				return fmt.Errorf("更新服务器延迟到数据库失败: %w", err)
+			}
+
 			return nil
 		}
 	}

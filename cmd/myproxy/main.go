@@ -95,7 +95,7 @@ func testUDP(client *socks5.SOCKS5Client, targetDNSAddr string) {
 	log.Printf("成功获取代理服务器 UDP 地址: %s:%d", proxyUDPAddr.Host, proxyUDPAddr.Port)
 
 	// 2. 建立本地 UDP 连接到代理的 UDP 端口
-	proxyNetAddr := fmt.Sprintf("%s:%d", proxyUDPAddr.Host, proxyUDPAddr.Port)
+	proxyNetAddr := fmt.Sprintf("%s:%d", proxyUDPAddr.Host, proxyUDPAddr.Port) 
 	localUDPConn, err := net.Dial("udp", proxyNetAddr)
 	if err != nil {
 		log.Fatalf("连接代理 UDP 端口失败: %v", err)
