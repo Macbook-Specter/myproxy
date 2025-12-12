@@ -4,13 +4,19 @@ import (
 	"fyne.io/fyne/v2"
 )
 
-// CustomBorderLayout 自定义 Border 布局，支持百分比控制
+// CustomBorderLayout 实现自定义 Border 布局，支持通过百分比精确控制顶部和底部区域的高度。
+// 这允许实现固定比例的区域划分，例如顶部 20%、底部 5%、中间 75%。
 type CustomBorderLayout struct {
 	topHeightPercent    float64 // 顶部高度百分比 (0.0-1.0)
 	bottomHeightPercent float64 // 底部高度百分比 (0.0-1.0)
 }
 
-// NewCustomBorderLayout 创建自定义 Border 布局
+// NewCustomBorderLayout 创建自定义 Border 布局实例。
+// 参数：
+//   - topPercent: 顶部区域高度百分比（0.0-1.0），例如 0.2 表示 20%
+//   - bottomPercent: 底部区域高度百分比（0.0-1.0），例如 0.05 表示 5%
+//
+// 返回：布局实例
 func NewCustomBorderLayout(topPercent, bottomPercent float64) *CustomBorderLayout {
 	return &CustomBorderLayout{
 		topHeightPercent:    topPercent,

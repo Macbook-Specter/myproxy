@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 )
 
-// Server 定义单个服务器信息
+// Server 表示一个 SOCKS5 代理服务器的配置信息。
 type Server struct {
 	ID       string `json:"id"`       // 服务器唯一标识
 	Name     string `json:"name"`     // 服务器名称
@@ -20,69 +20,36 @@ type Server struct {
 	Enabled  bool   `json:"enabled"`  // 是否启用
 }
 
-// ForwardRule 定义单个转发规则
-type ForwardRule struct {
-	ID         string `json:"id"`         // 规则唯一标识
-	Enabled    bool   `json:"enabled"`    // 是否启用
-	Protocol   string `json:"protocol"`   // 协议类型 ("tcp" 或 "udp")
-	LocalAddr  string `json:"localAddr"`  // 本地监听地址
-	RemoteAddr string `json:"remoteAddr"` // 远程目标地址
-}
-
-// Config 定义配置文件结构
+// Config 存储应用的配置信息。
+// 注意：GUI 应用使用数据库存储服务器和订阅信息，此配置主要用于日志和自动代理设置。
 type Config struct {
-	ProxyAddr             string        `json:"proxyAddr"`             // SOCKS5代理服务器地址
-	Username              string        `json:"username"`              // 认证用户名
-	Password              string        `json:"password"`              // 认证密码
-	ForwardRules          []ForwardRule `json:"forwardRules"`          // 转发规则列表
-	SubscriptionURL       string        `json:"subscriptionURL"`       // 订阅URL
-	Servers               []Server      `json:"servers"`               // 服务器列表
-	SelectedServerID      string        `json:"selectedServerID"`      // 当前选中的服务器ID
-	AutoProxyEnabled      bool          `json:"autoProxyEnabled"`      // 自动代理是否启用
-	AutoProxyPort         int           `json:"autoProxyPort"`         // 自动代理监听端口
-	AutoSetSystemProxy    bool          `json:"autoSetSystemProxy"`    // 是否自动设置系统代理
-	LogLevel              string        `json:"logLevel"`              // 日志级别
-	LogFile               string        `json:"logFile"`               // 日志文件路径
-	ServerListSplitOffset float64       `json:"serverListSplitOffset"` // 服务器列表和日志区域的分割位置 (0.0-1.0)
+	Servers          []Server `json:"servers"`          // 服务器列表（保留用于向后兼容，GUI 应用主要使用数据库）
+	SelectedServerID string   `json:"selectedServerID"` // 当前选中的服务器ID
+	AutoProxyEnabled bool     `json:"autoProxyEnabled"` // 自动代理是否启用
+	AutoProxyPort    int      `json:"autoProxyPort"`    // 自动代理监听端口
+	LogLevel         string   `json:"logLevel"`         // 日志级别
+	LogFile          string   `json:"logFile"`          // 日志文件路径
 }
 
-// DefaultConfig 返回默认配置
+// DefaultConfig 返回默认的应用配置。
+// 返回：包含默认值的配置实例
 func DefaultConfig() *Config {
 	return &Config{
-		ProxyAddr:          "127.0.0.1:1080",
-		AutoProxyEnabled:   false,
-		AutoProxyPort:      1080,
-		AutoSetSystemProxy: false,
-		LogLevel:           "info",
-		LogFile:            "myproxy.log",
-		ForwardRules: []ForwardRule{
-			{
-				ID:         "default-tcp",
-				Enabled:    true,
-				Protocol:   "tcp",
-				LocalAddr:  "127.0.0.1:8080",
-				RemoteAddr: "example.com:80",
-			},
-		},
-		Servers: []Server{
-			{
-				ID:       "default-server",
-				Name:     "Default Server",
-				Addr:     "127.0.0.1",
-				Port:     1080,
-				Username: "",
-				Password: "",
-				Delay:    0,
-				Selected: true,
-				Enabled:  true,
-			},
-		},
-		SelectedServerID:      "default-server",
-		ServerListSplitOffset: 0.7, // 默认服务器列表占70%
+		AutoProxyEnabled: false,
+		AutoProxyPort:    1080,
+		LogLevel:         "info",
+		LogFile:          "myproxy.log",
+		Servers:          []Server{},
+		SelectedServerID: "",
 	}
 }
 
-// LoadConfig 从文件加载配置
+// LoadConfig 从指定的 JSON 文件加载配置。
+// 如果文件不存在，会创建包含默认配置的新文件。
+// 参数：
+//   - filePath: 配置文件路径
+//
+// 返回：配置实例和错误（如果有）
 func LoadConfig(filePath string) (*Config, error) {
 	// 如果文件不存在，返回默认配置
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -114,7 +81,13 @@ func LoadConfig(filePath string) (*Config, error) {
 	return &config, nil
 }
 
-// SaveConfig 保存配置到文件
+// SaveConfig 将配置保存到指定的 JSON 文件。
+// 如果目录不存在，会自动创建。
+// 参数：
+//   - config: 要保存的配置实例
+//   - filePath: 配置文件路径
+//
+// 返回：错误（如果有）
 func SaveConfig(config *Config, filePath string) error {
 	// 验证配置
 	if err := config.Validate(); err != nil {
@@ -140,33 +113,25 @@ func SaveConfig(config *Config, filePath string) error {
 	return nil
 }
 
-// Validate 验证配置有效性
+// Validate 验证配置的有效性。
+// 该方法会检查日志级别、端口范围和服务器配置的合法性。
+// 返回：如果配置无效则返回错误，否则返回 nil
 func (c *Config) Validate() error {
-	// 检查代理地址
-	if c.ProxyAddr == "" {
-		return fmt.Errorf("代理地址不能为空")
+	// 检查日志级别
+	validLogLevels := map[string]bool{
+		"debug": true,
+		"info":  true,
+		"warn":  true,
+		"error": true,
+		"fatal": true,
+	}
+	if c.LogLevel != "" && !validLogLevels[c.LogLevel] {
+		return fmt.Errorf("无效的日志级别: %s", c.LogLevel)
 	}
 
-	// 检查转发规则
-	for i, rule := range c.ForwardRules {
-		if rule.ID == "" {
-			return fmt.Errorf("转发规则 %d 的ID不能为空", i)
-		}
+	// 注意：自动代理端口不进行有效性检查，允许用户根据实际情况选择任意端口
 
-		if rule.Protocol != "tcp" && rule.Protocol != "udp" {
-			return fmt.Errorf("转发规则 %s 的协议类型无效: %s", rule.ID, rule.Protocol)
-		}
-
-		if rule.LocalAddr == "" {
-			return fmt.Errorf("转发规则 %s 的本地地址不能为空", rule.ID)
-		}
-
-		if rule.RemoteAddr == "" {
-			return fmt.Errorf("转发规则 %s 的远程地址不能为空", rule.ID)
-		}
-	}
-
-	// 检查服务器列表
+	// 检查服务器列表（如果存在）
 	for i, server := range c.Servers {
 		if server.ID == "" {
 			return fmt.Errorf("服务器 %d 的ID不能为空", i)
@@ -182,42 +147,6 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
-}
-
-// AddForwardRule 添加转发规则
-func (c *Config) AddForwardRule(rule ForwardRule) error {
-	// 检查ID是否已存在
-	for _, r := range c.ForwardRules {
-		if r.ID == rule.ID {
-			return fmt.Errorf("转发规则ID已存在: %s", rule.ID)
-		}
-	}
-
-	c.ForwardRules = append(c.ForwardRules, rule)
-	return nil
-}
-
-// RemoveForwardRule 删除转发规则
-func (c *Config) RemoveForwardRule(id string) error {
-	for i, r := range c.ForwardRules {
-		if r.ID == id {
-			c.ForwardRules = append(c.ForwardRules[:i], c.ForwardRules[i+1:]...)
-			return nil
-		}
-	}
-
-	return fmt.Errorf("转发规则不存在: %s", id)
-}
-
-// GetForwardRule 获取转发规则
-func (c *Config) GetForwardRule(id string) (*ForwardRule, error) {
-	for i, r := range c.ForwardRules {
-		if r.ID == id {
-			return &c.ForwardRules[i], nil
-		}
-	}
-
-	return nil, fmt.Errorf("转发规则不存在: %s", id)
 }
 
 // AddServer 添加服务器

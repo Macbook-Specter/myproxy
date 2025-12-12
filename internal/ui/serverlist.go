@@ -2,17 +2,20 @@ package ui
 
 import (
 	"fmt"
-	"time"
+	"strconv"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 	"myproxy.com/p/internal/config"
+	"myproxy.com/p/internal/database"
+	"myproxy.com/p/internal/logging"
 	"myproxy.com/p/internal/proxy"
 )
 
-// ServerListPanel 服务器列表面板
+// ServerListPanel 管理服务器列表的显示和操作。
+// 它支持服务器选择、延迟测试、代理启动/停止等功能，并提供右键菜单操作。
 type ServerListPanel struct {
 	appState       *AppState
 	serverList     *widget.List
@@ -20,7 +23,12 @@ type ServerListPanel struct {
 	statusPanel    *StatusPanel // 状态面板引用（用于刷新）
 }
 
-// NewServerListPanel 创建服务器列表面板
+// NewServerListPanel 创建并初始化服务器列表面板。
+// 该方法会创建服务器列表组件并设置选中事件处理。
+// 参数：
+//   - appState: 应用状态实例
+//
+// 返回：初始化后的服务器列表面板实例
 func NewServerListPanel(appState *AppState) *ServerListPanel {
 	slp := &ServerListPanel{
 		appState: appState,
@@ -39,30 +47,35 @@ func NewServerListPanel(appState *AppState) *ServerListPanel {
 	return slp
 }
 
-// SetOnServerSelect 设置服务器选中回调
+// SetOnServerSelect 设置服务器选中时的回调函数。
+// 参数：
+//   - callback: 当用户选中服务器时调用的回调函数
 func (slp *ServerListPanel) SetOnServerSelect(callback func(server config.Server)) {
 	slp.onServerSelect = callback
 }
 
-// SetStatusPanel 设置状态面板引用
+// SetStatusPanel 设置状态面板的引用，以便在服务器操作后更新状态显示。
+// 参数：
+//   - statusPanel: 状态面板实例
 func (slp *ServerListPanel) SetStatusPanel(statusPanel *StatusPanel) {
 	slp.statusPanel = statusPanel
 }
 
-// Build 构建服务器列表面板 UI
+// Build 构建并返回服务器列表面板的 UI 组件。
+// 返回：包含操作按钮和服务器列表的容器组件
 func (slp *ServerListPanel) Build() fyne.CanvasObject {
 	// 操作按钮
 	testAllBtn := widget.NewButton("一键测延迟", slp.onTestAll)
-	setDefaultBtn := widget.NewButton("设为默认", slp.onSetDefault)
-	toggleEnableBtn := widget.NewButton("切换启用", slp.onToggleEnable)
+	startProxyBtn := widget.NewButton("启动代理", slp.onStartProxyFromSelected)
+	stopProxyBtn := widget.NewButton("停止代理", slp.onStopProxy)
 
 	// 服务器列表标题和按钮
 	headerArea := container.NewHBox(
 		widget.NewLabel("服务器列表"),
 		layout.NewSpacer(),
 		testAllBtn,
-		setDefaultBtn,
-		toggleEnableBtn,
+		startProxyBtn,
+		stopProxyBtn,
 	)
 
 	// 服务器列表滚动区域（不再展示右侧详情）
@@ -78,9 +91,11 @@ func (slp *ServerListPanel) Build() fyne.CanvasObject {
 	)
 }
 
-// Refresh 刷新服务器列表
+// Refresh 刷新服务器列表的显示，使 UI 反映最新的服务器数据。
 func (slp *ServerListPanel) Refresh() {
-	slp.serverList.Refresh()
+	fyne.Do(func() {
+		slp.serverList.Refresh()
+	})
 }
 
 // getServerCount 获取服务器数量
@@ -169,13 +184,6 @@ func (slp *ServerListPanel) onRightClick(id widget.ListItemID, ev *fyne.PointEve
 		fyne.NewMenuItem("停止代理", func() {
 			slp.onStopProxy()
 		}),
-		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("设为默认", func() {
-			slp.onSetDefaultServer(id)
-		}),
-		fyne.NewMenuItem("切换启用", func() {
-			slp.onToggleEnableServer(id)
-		}),
 	)
 
 	// 显示菜单
@@ -191,23 +199,82 @@ func (slp *ServerListPanel) onTestSpeed(id widget.ListItemID) {
 	}
 
 	srv := servers[id]
-	delay, err := slp.appState.PingManager.TestServerDelay(srv)
-	if err != nil {
-		slp.appState.Window.SetTitle(fmt.Sprintf("测速失败: %v", err))
+
+	// 在goroutine中执行测速
+	go func() {
+		// 记录开始测速日志
+		if slp.appState != nil {
+			slp.appState.AppendLog("INFO", "ping", fmt.Sprintf("开始测试服务器延迟: %s (%s:%d)", srv.Name, srv.Addr, srv.Port))
+		}
+
+		delay, err := slp.appState.PingManager.TestServerDelay(srv)
+		if err != nil {
+			// 记录失败日志
+			if slp.appState != nil {
+				slp.appState.AppendLog("ERROR", "ping", fmt.Sprintf("服务器 %s 测速失败: %v", srv.Name, err))
+			}
+			fyne.Do(func() {
+				slp.appState.Window.SetTitle(fmt.Sprintf("测速失败: %v", err))
+			})
+			return
+		}
+
+		// 更新服务器延迟
+		slp.appState.ServerManager.UpdateServerDelay(srv.ID, delay)
+
+		// 记录成功日志
+		if slp.appState != nil {
+			slp.appState.AppendLog("INFO", "ping", fmt.Sprintf("服务器 %s 测速完成: %d ms", srv.Name, delay))
+		}
+
+		// 更新UI（需要在主线程中执行）
+		fyne.Do(func() {
+			slp.Refresh()
+			slp.onSelected(id) // 刷新详情
+			// 更新状态绑定（使用双向绑定，UI 会自动更新）
+			if slp.appState != nil {
+				slp.appState.UpdateProxyStatus()
+			}
+			slp.appState.Window.SetTitle(fmt.Sprintf("测速完成: %d ms", delay))
+		})
+	}()
+}
+
+// onStartProxyFromSelected 从当前选中的服务器启动代理
+func (slp *ServerListPanel) onStartProxyFromSelected() {
+	if slp.appState.SelectedServerID == "" {
+		slp.appState.Window.SetTitle("请先选择一个服务器")
 		return
 	}
 
-	slp.appState.ServerManager.UpdateServerDelay(srv.ID, delay)
-	slp.Refresh()
-	slp.onSelected(id) // 刷新详情
-	// 更新状态绑定（使用双向绑定，UI 会自动更新）
-	if slp.appState != nil {
-		slp.appState.UpdateProxyStatus()
+	servers := slp.appState.ServerManager.ListServers()
+	var srv *config.Server
+	for i := range servers {
+		if servers[i].ID == slp.appState.SelectedServerID {
+			srv = &servers[i]
+			break
+		}
 	}
-	slp.appState.Window.SetTitle(fmt.Sprintf("测速完成: %d ms", delay))
+
+	if srv == nil {
+		slp.appState.Window.SetTitle("选中的服务器不存在")
+		return
+	}
+
+	// 如果已有代理在运行，先停止
+	if slp.appState.ProxyForwarder != nil && slp.appState.ProxyForwarder.IsRunning {
+		slp.appState.ProxyForwarder.Stop()
+	}
+
+	// 把当前的设置为选中
+	slp.appState.ServerManager.SelectServer(srv.ID)
+	slp.appState.SelectedServerID = srv.ID
+
+	// 启动代理
+	slp.startProxyWithServer(srv)
 }
 
-// onStartProxy 启动代理
+// onStartProxy 启动代理（右键菜单使用）
 func (slp *ServerListPanel) onStartProxy(id widget.ListItemID) {
 	servers := slp.appState.ServerManager.ListServers()
 	if id < 0 || id >= len(servers) {
@@ -223,26 +290,41 @@ func (slp *ServerListPanel) onStartProxy(id widget.ListItemID) {
 		slp.appState.ProxyForwarder.Stop()
 	}
 
+	// 启动代理
+	slp.startProxyWithServer(&srv)
+}
+
+// startProxyWithServer 使用指定的服务器启动代理
+func (slp *ServerListPanel) startProxyWithServer(srv *config.Server) {
+
 	// 如果端口为0，自动分配一个可用端口
-	if slp.appState.Config.AutoProxyPort == 0 {
-		slp.appState.Config.AutoProxyPort = 1080 // 默认端口
+	proxyPort := slp.appState.Config.AutoProxyPort
+	if proxyPort == 0 {
+		proxyPort = 1080 // 默认端口
+		slp.appState.Config.AutoProxyPort = proxyPort
 	}
 
 	// 创建并启动自动代理转发器
-	localAddr := fmt.Sprintf("127.0.0.1:%d", slp.appState.Config.AutoProxyPort)
+	localAddr := fmt.Sprintf("127.0.0.1:%d", proxyPort)
 	forwarder := proxy.NewAutoProxyForwarder(localAddr, "tcp", slp.appState.ServerManager)
+
+	// 设置日志回调，将日志输出到日志区域
+	if slp.appState != nil {
+		forwarder.SetLogCallback(func(level, logType, message string) {
+			slp.appState.AppendLog(level, logType, message)
+		})
+	}
 
 	// 实际启动代理服务
 	err := forwarder.Start()
 	if err != nil {
-		// 启动失败，记录日志并显示错误
-		if slp.appState.Logger != nil {
-			slp.appState.Logger.Error("启动代理失败: %v", err)
-		}
+		// 启动失败，记录日志并显示错误（统一错误处理）
+		slp.logAndShowError("启动代理失败", err)
 		slp.appState.Config.AutoProxyEnabled = false
 		slp.appState.ProxyForwarder = nil
 		slp.appState.UpdateProxyStatus()
-		slp.appState.Window.SetTitle(fmt.Sprintf("代理启动失败: %v", err))
+		// 保存配置到数据库
+		slp.saveConfigToDB()
 		return
 	}
 
@@ -250,24 +332,48 @@ func (slp *ServerListPanel) onStartProxy(id widget.ListItemID) {
 	slp.appState.ProxyForwarder = forwarder
 	slp.appState.Config.AutoProxyEnabled = true
 
-	// 记录日志
+	// 记录日志（统一日志记录）
 	if slp.appState.Logger != nil {
-		slp.appState.Logger.Info("代理已启动: %s (端口: %d)", srv.Name, slp.appState.Config.AutoProxyPort)
+		slp.appState.Logger.InfoWithType(logging.LogTypeProxy, "代理已启动: %s (端口: %d)", srv.Name, proxyPort)
+	}
+
+	// 追加日志到日志面板
+	if slp.appState != nil {
+		slp.appState.AppendLog("INFO", "proxy", fmt.Sprintf("代理已启动: %s (端口: %d)", srv.Name, proxyPort))
 	}
 
 	slp.Refresh()
 	// 更新状态绑定（使用双向绑定，UI 会自动更新）
 	slp.appState.UpdateProxyStatus()
 
-	// 延迟刷新日志面板，确保日志已写入
-	go func() {
-		time.Sleep(200 * time.Millisecond)
-		if slp.appState != nil && slp.appState.MainWindow != nil {
-			slp.appState.MainWindow.Refresh()
-		}
-	}()
+	slp.appState.Window.SetTitle(fmt.Sprintf("代理已启动: %s (端口: %d)", srv.Name, proxyPort))
 
-	slp.appState.Window.SetTitle(fmt.Sprintf("代理已启动: %s (端口: %d)", srv.Name, slp.appState.Config.AutoProxyPort))
+	// 保存配置到数据库
+	slp.saveConfigToDB()
+}
+
+// logAndShowError 记录日志并显示错误对话框（统一错误处理）
+func (slp *ServerListPanel) logAndShowError(message string, err error) {
+	if slp.appState != nil && slp.appState.Logger != nil {
+		slp.appState.Logger.Error("%s: %v", message, err)
+	}
+	if slp.appState != nil && slp.appState.Window != nil {
+		slp.appState.Window.SetTitle(fmt.Sprintf("%s: %v", message, err))
+	}
+}
+
+// saveConfigToDB 保存应用配置到数据库（统一配置保存）
+func (slp *ServerListPanel) saveConfigToDB() {
+	if slp.appState == nil || slp.appState.Config == nil {
+		return
+	}
+	cfg := slp.appState.Config
+
+	// 保存配置到数据库
+	database.SetAppConfig("logLevel", cfg.LogLevel)
+	database.SetAppConfig("logFile", cfg.LogFile)
+	database.SetAppConfig("autoProxyEnabled", strconv.FormatBool(cfg.AutoProxyEnabled))
+	database.SetAppConfig("autoProxyPort", strconv.Itoa(cfg.AutoProxyPort))
 }
 
 // onStopProxy 停止代理
@@ -276,11 +382,8 @@ func (slp *ServerListPanel) onStopProxy() {
 	if slp.appState.ProxyForwarder != nil && slp.appState.ProxyForwarder.IsRunning {
 		err := slp.appState.ProxyForwarder.Stop()
 		if err != nil {
-			// 停止失败，记录日志
-			if slp.appState.Logger != nil {
-				slp.appState.Logger.Error("停止代理失败: %v", err)
-			}
-			slp.appState.Window.SetTitle(fmt.Sprintf("停止代理失败: %v", err))
+			// 停止失败，记录日志并显示错误（统一错误处理）
+			slp.logAndShowError("停止代理失败", err)
 			return
 		}
 
@@ -288,21 +391,21 @@ func (slp *ServerListPanel) onStopProxy() {
 		slp.appState.Config.AutoProxyEnabled = false
 		slp.appState.Config.AutoProxyPort = 0
 
-		// 记录日志
+		// 记录日志（统一日志记录）
 		if slp.appState.Logger != nil {
-			slp.appState.Logger.Info("代理已停止")
+			slp.appState.Logger.InfoWithType(logging.LogTypeProxy, "代理已停止")
+		}
+
+		// 追加日志到日志面板
+		if slp.appState != nil {
+			slp.appState.AppendLog("INFO", "proxy", "代理已停止")
 		}
 
 		// 更新状态绑定
 		slp.appState.UpdateProxyStatus()
 
-		// 延迟刷新日志面板，确保日志已写入
-		go func() {
-			time.Sleep(200 * time.Millisecond)
-			if slp.appState != nil && slp.appState.MainWindow != nil {
-				slp.appState.MainWindow.Refresh()
-			}
-		}()
+		// 保存配置到数据库
+		slp.saveConfigToDB()
 
 		slp.appState.Window.SetTitle("代理已停止")
 	} else {
@@ -312,102 +415,58 @@ func (slp *ServerListPanel) onStopProxy() {
 
 // onTestAll 一键测延迟
 func (slp *ServerListPanel) onTestAll() {
-	results := slp.appState.PingManager.TestAllServersDelay()
-	slp.Refresh()
-	slp.appState.Window.SetTitle(fmt.Sprintf("测速完成，共测试 %d 个服务器", len(results)))
-}
+	// 在goroutine中执行测速
+	go func() {
+		servers := slp.appState.ServerManager.ListServers()
+		enabledCount := 0
+		for _, s := range servers {
+			if s.Enabled {
+				enabledCount++
+			}
+		}
 
-// onSetDefault 设为默认
-func (slp *ServerListPanel) onSetDefault() {
-	if slp.appState.SelectedServerID == "" {
-		slp.appState.Window.SetTitle("请先选择一个服务器")
-		return
-	}
+		// 记录开始测速日志
+		if slp.appState != nil {
+			slp.appState.AppendLog("INFO", "ping", fmt.Sprintf("开始一键测速，共 %d 个启用的服务器", enabledCount))
+		}
 
-	err := slp.appState.ServerManager.SelectServer(slp.appState.SelectedServerID)
-	if err != nil {
-		slp.appState.Window.SetTitle("设置失败: " + err.Error())
-		return
-	}
+		results := slp.appState.PingManager.TestAllServersDelay()
 
-	slp.Refresh()
-	// 更新状态绑定（使用双向绑定，UI 会自动更新）
-	if slp.appState != nil {
-		slp.appState.UpdateProxyStatus()
-	}
-	slp.appState.Window.SetTitle("已设为默认服务器")
-}
+		// 统计结果并记录每个服务器的详细日志
+		successCount := 0
+		failCount := 0
+		for _, srv := range servers {
+			if !srv.Enabled {
+				continue
+			}
+			delay, exists := results[srv.ID]
+			if !exists {
+				continue
+			}
+			if delay > 0 {
+				successCount++
+				if slp.appState != nil {
+					slp.appState.AppendLog("INFO", "ping", fmt.Sprintf("服务器 %s (%s:%d) 测速完成: %d ms", srv.Name, srv.Addr, srv.Port, delay))
+				}
+			} else {
+				failCount++
+				if slp.appState != nil {
+					slp.appState.AppendLog("ERROR", "ping", fmt.Sprintf("服务器 %s (%s:%d) 测速失败", srv.Name, srv.Addr, srv.Port))
+				}
+			}
+		}
 
-// onSetDefaultServer 设为默认（通过ID）
-func (slp *ServerListPanel) onSetDefaultServer(id widget.ListItemID) {
-	servers := slp.appState.ServerManager.ListServers()
-	if id < 0 || id >= len(servers) {
-		return
-	}
+		// 记录完成日志
+		if slp.appState != nil {
+			slp.appState.AppendLog("INFO", "ping", fmt.Sprintf("一键测速完成: 成功 %d 个，失败 %d 个，共测试 %d 个服务器", successCount, failCount, len(results)))
+		}
 
-	srv := servers[id]
-	err := slp.appState.ServerManager.SelectServer(srv.ID)
-	if err != nil {
-		slp.appState.Window.SetTitle("设置失败: " + err.Error())
-		return
-	}
-
-	slp.Refresh()
-	// 更新状态绑定（使用双向绑定，UI 会自动更新）
-	if slp.appState != nil {
-		slp.appState.UpdateProxyStatus()
-	}
-	slp.appState.Window.SetTitle("已设为默认服务器")
-	// 通知主窗口刷新状态面板
-	if slp.appState != nil && slp.appState.Window != nil {
-		// 可以通过事件机制通知，这里简化处理
-	}
-}
-
-// onToggleEnable 切换启用
-func (slp *ServerListPanel) onToggleEnable() {
-	if slp.appState.SelectedServerID == "" {
-		slp.appState.Window.SetTitle("请先选择一个服务器")
-		return
-	}
-
-	srv, err := slp.appState.ServerManager.GetServer(slp.appState.SelectedServerID)
-	if err != nil {
-		slp.appState.Window.SetTitle("获取服务器失败: " + err.Error())
-		return
-	}
-
-	// 切换启用状态
-	newSrv := *srv
-	newSrv.Enabled = !newSrv.Enabled
-	err = slp.appState.ServerManager.UpdateServer(newSrv)
-	if err != nil {
-		slp.appState.Window.SetTitle("更新失败: " + err.Error())
-		return
-	}
-
-	slp.Refresh()
-	slp.onSelected(slp.getSelectedIndex())
-}
-
-// onToggleEnableServer 切换启用（通过ID）
-func (slp *ServerListPanel) onToggleEnableServer(id widget.ListItemID) {
-	servers := slp.appState.ServerManager.ListServers()
-	if id < 0 || id >= len(servers) {
-		return
-	}
-
-	srv := servers[id]
-	newSrv := srv
-	newSrv.Enabled = !newSrv.Enabled
-	err := slp.appState.ServerManager.UpdateServer(newSrv)
-	if err != nil {
-		slp.appState.Window.SetTitle("更新失败: " + err.Error())
-		return
-	}
-
-	slp.Refresh()
-	slp.onSelected(id)
+		// 更新UI（需要在主线程中执行）
+		fyne.Do(func() {
+			slp.Refresh()
+			slp.appState.Window.SetTitle(fmt.Sprintf("测速完成，共测试 %d 个服务器", len(results)))
+		})
+	}()
 }
 
 // getSelectedIndex 获取当前选中的索引
@@ -453,5 +512,7 @@ func (s *ServerListItem) TappedSecondary(pe *fyne.PointEvent) {
 
 // SetText 设置文本
 func (s *ServerListItem) SetText(text string) {
-	s.label.SetText(text)
+	fyne.Do(func() {
+		s.label.SetText(text)
+	})
 }

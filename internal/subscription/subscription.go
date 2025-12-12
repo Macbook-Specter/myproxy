@@ -95,12 +95,26 @@ func (sm *SubscriptionManager) UpdateSubscription(url string, label ...string) e
 		}
 	}
 
+	// 获取现有订阅（用于清理旧服务器）
+	existingSub, err := database.GetSubscriptionByURL(url)
+	if err != nil {
+		return fmt.Errorf("获取订阅信息失败: %w", err)
+	}
+
+	// 如果存在旧订阅，先清理该订阅下的服务器，避免更新后重复累加
+	if existingSub != nil {
+		if err := database.DeleteServersBySubscriptionID(existingSub.ID); err != nil {
+			return fmt.Errorf("清理旧订阅服务器失败: %w", err)
+		}
+	}
+
+	// 拉取并保存最新服务器；内部会更新订阅标签并写库
 	servers, err := sm.FetchSubscription(url, subscriptionLabel)
 	if err != nil {
 		return err
 	}
 
-	// 获取订阅信息
+	// 再次获取订阅信息（防止标签更新或首次创建）
 	sub, err := database.GetSubscriptionByURL(url)
 	if err != nil {
 		return fmt.Errorf("获取订阅信息失败: %w", err)

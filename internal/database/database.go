@@ -14,7 +14,12 @@ import (
 // DB 数据库连接
 var DB *sql.DB
 
-// InitDB 初始化数据库
+// InitDB 初始化 SQLite 数据库，创建必要的表结构。
+// 如果数据库文件不存在，会自动创建。如果表已存在，不会重复创建。
+// 参数：
+//   - dbPath: 数据库文件路径
+//
+// 返回：错误（如果有）
 func InitDB(dbPath string) error {
 	// 创建目录（如果不存在）
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
@@ -71,9 +76,19 @@ func createTables() error {
 		FOREIGN KEY (subscription_id) REFERENCES subscriptions(id) ON DELETE SET NULL
 	);`
 
-	// 创建布局配置表
+	// 创建布局配置表（用于存储窗口布局配置）
 	createLayoutConfigTable := `
 	CREATE TABLE IF NOT EXISTS layout_config (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		key TEXT NOT NULL UNIQUE,
+		value TEXT NOT NULL,
+		created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);`
+
+	// 创建应用配置表（用于存储应用配置，如日志级别、日志文件路径、主题等）
+	createAppConfigTable := `
+	CREATE TABLE IF NOT EXISTS app_config (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		key TEXT NOT NULL UNIQUE,
 		value TEXT NOT NULL,
@@ -87,6 +102,7 @@ func createTables() error {
 	CREATE INDEX IF NOT EXISTS idx_servers_enabled ON servers(enabled);
 	CREATE INDEX IF NOT EXISTS idx_subscriptions_url ON subscriptions(url);
 	CREATE INDEX IF NOT EXISTS idx_layout_config_key ON layout_config(key);
+	CREATE INDEX IF NOT EXISTS idx_app_config_key ON app_config(key);
 	`
 
 	if _, err := DB.Exec(createSubscriptionsTable); err != nil {
@@ -101,6 +117,10 @@ func createTables() error {
 		return fmt.Errorf("创建布局配置表失败: %w", err)
 	}
 
+	if _, err := DB.Exec(createAppConfigTable); err != nil {
+		return fmt.Errorf("创建应用配置表失败: %w", err)
+	}
+
 	if _, err := DB.Exec(createIndexes); err != nil {
 		return fmt.Errorf("创建索引失败: %w", err)
 	}
@@ -108,7 +128,9 @@ func createTables() error {
 	return nil
 }
 
-// CloseDB 关闭数据库连接
+// CloseDB 关闭数据库连接。
+// 应该在应用退出时调用此方法以正确释放资源。
+// 返回：错误（如果有）
 func CloseDB() error {
 	if DB != nil {
 		return DB.Close()
@@ -116,7 +138,7 @@ func CloseDB() error {
 	return nil
 }
 
-// Subscription 订阅信息
+// Subscription 表示一个订阅配置，包含 URL 和标签信息。
 type Subscription struct {
 	ID        int64     `json:"id"`
 	URL       string    `json:"url"`
@@ -125,7 +147,13 @@ type Subscription struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// AddOrUpdateSubscription 添加或更新订阅
+// AddOrUpdateSubscription 添加新订阅或更新现有订阅。
+// 如果订阅 URL 已存在，则更新其标签；否则创建新订阅。
+// 参数：
+//   - url: 订阅 URL
+//   - label: 订阅标签
+//
+// 返回：订阅实例和错误（如果有）
 func AddOrUpdateSubscription(url, label string) (*Subscription, error) {
 	now := time.Now()
 
@@ -174,7 +202,11 @@ func AddOrUpdateSubscription(url, label string) (*Subscription, error) {
 	return &sub, nil
 }
 
-// GetSubscriptionByURL 根据URL获取订阅
+// GetSubscriptionByURL 根据 URL 查找订阅。
+// 参数：
+//   - url: 订阅 URL
+//
+// 返回：订阅实例和错误（如果未找到或发生错误）
 func GetSubscriptionByURL(url string) (*Subscription, error) {
 	var sub Subscription
 	err := DB.QueryRow(
@@ -192,7 +224,8 @@ func GetSubscriptionByURL(url string) (*Subscription, error) {
 	return &sub, nil
 }
 
-// GetAllSubscriptions 获取所有订阅
+// GetAllSubscriptions 获取所有订阅列表。
+// 返回：订阅列表和错误（如果有）
 func GetAllSubscriptions() ([]*Subscription, error) {
 	rows, err := DB.Query("SELECT id, url, label, created_at, updated_at FROM subscriptions ORDER BY created_at DESC")
 	if err != nil {
@@ -216,7 +249,11 @@ func GetAllSubscriptions() ([]*Subscription, error) {
 	return subscriptions, nil
 }
 
-// DeleteSubscription 删除订阅
+// DeleteSubscription 删除指定的订阅及其关联的所有服务器。
+// 参数：
+//   - url: 要删除的订阅 URL
+//
+// 返回：错误（如果有）
 func DeleteSubscription(url string) error {
 	_, err := DB.Exec("DELETE FROM subscriptions WHERE url = ?", url)
 	if err != nil {
@@ -225,8 +262,14 @@ func DeleteSubscription(url string) error {
 	return nil
 }
 
-// AddOrUpdateServer 添加或更新服务器
-// 如果 subscriptionID 为 nil 且服务器已存在，则保持原有的 subscription_id
+// AddOrUpdateServer 添加新服务器或更新现有服务器。
+// 如果服务器 ID 已存在，则更新其信息；否则创建新服务器。
+// 如果 subscriptionID 为 nil 且服务器已存在，则保持原有的 subscription_id。
+// 参数：
+//   - server: 服务器配置信息
+//   - subscriptionID: 关联的订阅 ID（可选，可为 nil）
+//
+// 返回：错误（如果有）
 func AddOrUpdateServer(server config.Server, subscriptionID *int64) error {
 	now := time.Now()
 
@@ -277,7 +320,11 @@ func AddOrUpdateServer(server config.Server, subscriptionID *int64) error {
 	return nil
 }
 
-// GetServerSubscriptionID 获取服务器的订阅ID
+// GetServerSubscriptionID 获取服务器关联的订阅 ID。
+// 参数：
+//   - serverID: 服务器 ID
+//
+// 返回：订阅 ID（如果存在）和错误（如果有）
 func GetServerSubscriptionID(serverID string) (*int64, error) {
 	var subscriptionID sql.NullInt64
 	err := DB.QueryRow("SELECT subscription_id FROM servers WHERE id = ?", serverID).
@@ -296,7 +343,11 @@ func GetServerSubscriptionID(serverID string) (*int64, error) {
 	return nil, nil
 }
 
-// GetServer 获取服务器
+// GetServer 根据 ID 获取服务器信息。
+// 参数：
+//   - id: 服务器 ID
+//
+// 返回：服务器实例和错误（如果未找到或发生错误）
 func GetServer(id string) (*config.Server, error) {
 	var server config.Server
 	var selected, enabled int
@@ -322,7 +373,8 @@ func GetServer(id string) (*config.Server, error) {
 	return &server, nil
 }
 
-// GetAllServers 获取所有服务器
+// GetAllServers 获取所有服务器列表。
+// 返回：服务器列表和错误（如果有）
 func GetAllServers() ([]config.Server, error) {
 	rows, err := DB.Query(
 		`SELECT id, name, addr, port, username, password, delay, selected, enabled
@@ -356,7 +408,11 @@ func GetAllServers() ([]config.Server, error) {
 	return servers, nil
 }
 
-// GetServersBySubscriptionID 根据订阅ID获取服务器列表
+// GetServersBySubscriptionID 获取指定订阅关联的所有服务器。
+// 参数：
+//   - subscriptionID: 订阅 ID
+//
+// 返回：服务器列表和错误（如果有）
 func GetServersBySubscriptionID(subscriptionID int64) ([]config.Server, error) {
 	rows, err := DB.Query(
 		`SELECT id, name, addr, port, username, password, delay, selected, enabled
@@ -391,7 +447,12 @@ func GetServersBySubscriptionID(subscriptionID int64) ([]config.Server, error) {
 	return servers, nil
 }
 
-// UpdateServerDelay 更新服务器延迟
+// UpdateServerDelay 更新服务器的延迟值。
+// 参数：
+//   - id: 服务器 ID
+//   - delay: 新的延迟值（毫秒）
+//
+// 返回：错误（如果有）
 func UpdateServerDelay(id string, delay int) error {
 	_, err := DB.Exec(
 		"UPDATE servers SET delay = ?, updated_at = ? WHERE id = ?",
@@ -403,7 +464,11 @@ func UpdateServerDelay(id string, delay int) error {
 	return nil
 }
 
-// DeleteServer 删除服务器
+// DeleteServer 删除指定的服务器。
+// 参数：
+//   - id: 要删除的服务器 ID
+//
+// 返回：错误（如果有）
 func DeleteServer(id string) error {
 	_, err := DB.Exec("DELETE FROM servers WHERE id = ?", id)
 	if err != nil {
@@ -412,7 +477,11 @@ func DeleteServer(id string) error {
 	return nil
 }
 
-// DeleteServersBySubscriptionID 删除指定订阅的所有服务器
+// DeleteServersBySubscriptionID 删除指定订阅关联的所有服务器。
+// 参数：
+//   - subscriptionID: 订阅 ID
+//
+// 返回：错误（如果有）
 func DeleteServersBySubscriptionID(subscriptionID int64) error {
 	_, err := DB.Exec("DELETE FROM servers WHERE subscription_id = ?", subscriptionID)
 	if err != nil {
@@ -421,7 +490,12 @@ func DeleteServersBySubscriptionID(subscriptionID int64) error {
 	return nil
 }
 
-// SetLayoutConfig 设置布局配置
+// SetLayoutConfig 保存布局配置到数据库。
+// 参数：
+//   - key: 配置键名
+//   - value: 配置值（JSON 格式字符串）
+//
+// 返回：错误（如果有）
 func SetLayoutConfig(key, value string) error {
 	now := time.Now()
 	_, err := DB.Exec(
@@ -436,7 +510,11 @@ func SetLayoutConfig(key, value string) error {
 	return nil
 }
 
-// GetLayoutConfig 获取布局配置
+// GetLayoutConfig 从数据库获取布局配置。
+// 参数：
+//   - key: 配置键名
+//
+// 返回：配置值（JSON 格式字符串）和错误（如果未找到或发生错误）
 func GetLayoutConfig(key string) (string, error) {
 	var value string
 	err := DB.QueryRow("SELECT value FROM layout_config WHERE key = ?", key).Scan(&value)
@@ -449,7 +527,12 @@ func GetLayoutConfig(key string) (string, error) {
 	return value, nil
 }
 
-// GetLayoutConfigWithDefault 获取布局配置，如果不存在则返回默认值
+// GetLayoutConfigWithDefault 获取布局配置，如果不存在则返回默认值。
+// 参数：
+//   - key: 配置键名
+//   - defaultValue: 默认值（当配置不存在时返回）
+//
+// 返回：配置值或默认值和错误（如果有）
 func GetLayoutConfigWithDefault(key, defaultValue string) (string, error) {
 	value, err := GetLayoutConfig(key)
 	if err != nil {
@@ -458,6 +541,64 @@ func GetLayoutConfigWithDefault(key, defaultValue string) (string, error) {
 	if value == "" {
 		// 如果不存在，写入默认值
 		if err := SetLayoutConfig(key, defaultValue); err != nil {
+			return "", err
+		}
+		return defaultValue, nil
+	}
+	return value, nil
+}
+
+// SetAppConfig 保存应用配置到数据库的 app_config 表。
+// 参数：
+//   - key: 配置键名（如 "logLevel", "logFile", "autoProxyEnabled", "autoProxyPort", "theme"）
+//   - value: 配置值（字符串格式）
+//
+// 返回：错误（如果有）
+func SetAppConfig(key, value string) error {
+	now := time.Now()
+	_, err := DB.Exec(
+		`INSERT INTO app_config (key, value, created_at, updated_at)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = ?`,
+		key, value, now, now, value, now,
+	)
+	if err != nil {
+		return fmt.Errorf("设置应用配置失败: %w", err)
+	}
+	return nil
+}
+
+// GetAppConfig 从数据库的 app_config 表获取应用配置。
+// 参数：
+//   - key: 配置键名
+//
+// 返回：配置值和错误（如果未找到或发生错误）
+func GetAppConfig(key string) (string, error) {
+	var value string
+	err := DB.QueryRow("SELECT value FROM app_config WHERE key = ?", key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("获取应用配置失败: %w", err)
+	}
+	return value, nil
+}
+
+// GetAppConfigWithDefault 获取应用配置，如果不存在则返回默认值。
+// 参数：
+//   - key: 配置键名
+//   - defaultValue: 默认值（当配置不存在时返回）
+//
+// 返回：配置值或默认值和错误（如果有）
+func GetAppConfigWithDefault(key, defaultValue string) (string, error) {
+	value, err := GetAppConfig(key)
+	if err != nil {
+		return "", err
+	}
+	if value == "" {
+		// 如果不存在，写入默认值
+		if err := SetAppConfig(key, defaultValue); err != nil {
 			return "", err
 		}
 		return defaultValue, nil

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 
 	"fyne.io/fyne/v2"
@@ -11,8 +12,8 @@ import (
 	"myproxy.com/p/internal/database"
 )
 
-// SubscriptionPanel 订阅管理面板
-// 使用双向绑定自动更新标签显示
+// SubscriptionPanel 管理订阅的显示和操作。
+// 它使用双向数据绑定自动更新标签显示，支持添加、编辑和删除订阅。
 type SubscriptionPanel struct {
 	appState      *AppState
 	tagContainer  fyne.CanvasObject // 标签容器（使用 HBox 以便动态更新）
@@ -20,7 +21,12 @@ type SubscriptionPanel struct {
 	subscriptions []*database.Subscription
 }
 
-// NewSubscriptionPanel 创建订阅管理面板
+// NewSubscriptionPanel 创建并初始化订阅管理面板。
+// 该方法会创建标签容器、加载订阅列表，并设置数据绑定监听器。
+// 参数：
+//   - appState: 应用状态实例
+//
+// 返回：初始化后的订阅管理面板实例
 func NewSubscriptionPanel(appState *AppState) *SubscriptionPanel {
 	sp := &SubscriptionPanel{
 		appState: appState,
@@ -40,19 +46,22 @@ func NewSubscriptionPanel(appState *AppState) *SubscriptionPanel {
 	return sp
 }
 
-// Build 构建订阅面板 UI
+// Build 构建并返回订阅管理面板的 UI 组件。
+// 返回：包含订阅标签和添加按钮的容器组件
 func (sp *SubscriptionPanel) Build() fyne.CanvasObject {
 	// 从绑定数据初始化标签显示
 	sp.updateTagsFromBinding()
 
 	// 加号按钮
 	addBtn := widget.NewButton("+", sp.onAddSubscription)
+	updateBtn := widget.NewButton("更新订阅", sp.onUpdateSubscription)
 
 	// 订阅管理标题和标签组
 	sp.headerArea = container.NewHBox(
 		widget.NewLabel("订阅管理"),
 		sp.tagContainer,
 		addBtn,
+		updateBtn,
 	)
 
 	return container.NewVBox(
@@ -145,11 +154,11 @@ func (sp *SubscriptionPanel) onEditSubscription(sub *database.Subscription) {
 
 		// 验证必填项
 		if url == "" {
-			dialog.ShowError(fmt.Errorf("订阅URL不能为空"), sp.appState.Window)
+			sp.showError("订阅URL不能为空")
 			return
 		}
 		if label == "" {
-			dialog.ShowError(fmt.Errorf("标签不能为空"), sp.appState.Window)
+			sp.showError("标签不能为空")
 			return
 		}
 
@@ -158,14 +167,14 @@ func (sp *SubscriptionPanel) onEditSubscription(sub *database.Subscription) {
 			// 更新订阅
 			err := sp.appState.SubscriptionManager.UpdateSubscription(url, label)
 			if err != nil {
-				dialog.ShowError(fmt.Errorf("订阅更新失败: %w", err), sp.appState.Window)
+				sp.logAndShowError("订阅更新失败", err)
 				return
 			}
 		} else if label != sub.Label {
 			// 只更新标签
 			_, err := database.AddOrUpdateSubscription(url, label)
 			if err != nil {
-				dialog.ShowError(fmt.Errorf("标签更新失败: %w", err), sp.appState.Window)
+				sp.logAndShowError("标签更新失败", err)
 				return
 			}
 		}
@@ -206,18 +215,18 @@ func (sp *SubscriptionPanel) onAddSubscription() {
 
 		// 验证必填项
 		if url == "" {
-			dialog.ShowError(fmt.Errorf("订阅URL不能为空"), sp.appState.Window)
+			sp.showError("订阅URL不能为空")
 			return
 		}
 		if label == "" {
-			dialog.ShowError(fmt.Errorf("标签不能为空"), sp.appState.Window)
+			sp.showError("标签不能为空")
 			return
 		}
 
 		// 获取订阅
 		servers, err := sp.appState.SubscriptionManager.FetchSubscription(url, label)
 		if err != nil {
-			dialog.ShowError(fmt.Errorf("订阅获取失败: %w", err), sp.appState.Window)
+			sp.logAndShowError("订阅获取失败", err)
 			return
 		}
 
@@ -230,6 +239,23 @@ func (sp *SubscriptionPanel) onAddSubscription() {
 	}, sp.appState.Window)
 }
 
+// showError 显示错误对话框（统一错误处理）
+func (sp *SubscriptionPanel) showError(message string) {
+	if sp.appState != nil && sp.appState.Window != nil {
+		dialog.ShowError(errors.New(message), sp.appState.Window)
+	}
+}
+
+// logAndShowError 记录日志并显示错误对话框（统一错误处理）
+func (sp *SubscriptionPanel) logAndShowError(message string, err error) {
+	if sp.appState != nil && sp.appState.Logger != nil {
+		sp.appState.Logger.Error("%s: %v", message, err)
+	}
+	if sp.appState != nil && sp.appState.Window != nil {
+		dialog.ShowError(fmt.Errorf("%s: %w", message, err), sp.appState.Window)
+	}
+}
+
 // refreshSubscriptionList 刷新订阅列表
 func (sp *SubscriptionPanel) refreshSubscriptionList() {
 	subscriptions, err := database.GetAllSubscriptions()
@@ -240,4 +266,64 @@ func (sp *SubscriptionPanel) refreshSubscriptionList() {
 		sp.subscriptions = subscriptions
 	}
 	// 注意：不再在这里刷新标签，而是通过绑定自动更新
+}
+
+// onUpdateSubscription 重新解析订阅URL并更新服务器列表
+func (sp *SubscriptionPanel) onUpdateSubscription() {
+	// 确保最新列表
+	sp.refreshSubscriptionList()
+	if len(sp.subscriptions) == 0 {
+		sp.showError("暂无订阅可更新")
+		return
+	}
+
+	// 选项列表
+	options := make([]string, len(sp.subscriptions))
+	for i, sub := range sp.subscriptions {
+		options[i] = fmt.Sprintf("%s (%s)", sub.Label, sub.URL)
+	}
+
+	selectedIndex := 0
+	selectWidget := widget.NewSelect(options, func(value string) {
+		for i, opt := range options {
+			if opt == value {
+				selectedIndex = i
+				break
+			}
+		}
+	})
+	selectWidget.SetSelected(options[0])
+
+	formItems := []*widget.FormItem{
+		{Text: "选择订阅", Widget: selectWidget},
+	}
+
+	dialog.ShowForm("更新订阅", "更新", "取消", formItems, func(confirmed bool) {
+		if !confirmed {
+			return
+		}
+
+		if selectedIndex < 0 || selectedIndex >= len(sp.subscriptions) {
+			sp.showError("请选择要更新的订阅")
+			return
+		}
+
+		sub := sp.subscriptions[selectedIndex]
+		if err := sp.appState.SubscriptionManager.UpdateSubscription(sub.URL, sub.Label); err != nil {
+			sp.logAndShowError("更新订阅失败", err)
+			return
+		}
+
+		// 刷新订阅、服务器及状态显示
+		sp.refreshSubscriptionList()
+		sp.appState.UpdateSubscriptionLabels()
+		// 从数据库重新同步服务器列表，确保UI与最新数据一致
+		if sp.appState != nil {
+			sp.appState.LoadServersFromDB()
+		}
+		if sp.appState != nil && sp.appState.MainWindow != nil {
+			sp.appState.MainWindow.Refresh()
+		}
+		sp.appState.Window.SetTitle("订阅已更新")
+	}, sp.appState.Window)
 }

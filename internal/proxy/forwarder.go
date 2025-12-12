@@ -11,6 +11,10 @@ import (
 	"myproxy.com/p/internal/server"
 )
 
+// LogCallback 定义日志回调函数类型
+// 参数：level (日志级别，如 "INFO", "ERROR"), logType (日志类型，如 "proxy"), message (日志消息)
+type LogCallback func(level, logType, message string)
+
 // Forwarder 定义端口转发器结构体
 type Forwarder struct {
 	SOCKS5Client   *socks5.SOCKS5Client
@@ -22,6 +26,7 @@ type Forwarder struct {
 	ServerManager  *server.ServerManager // 服务器管理器，用于自动代理模式
 	listener       net.Listener
 	udpConn        *net.UDPConn
+	logCallback    LogCallback // 日志回调函数
 }
 
 // NewForwarder 创建一个新的端口转发器
@@ -51,6 +56,22 @@ func NewAutoProxyForwarder(localAddr, protocol string, serverManager *server.Ser
 	}
 }
 
+// SetLogCallback 设置日志回调函数
+func (f *Forwarder) SetLogCallback(callback LogCallback) {
+	f.logCallback = callback
+}
+
+// log 内部日志方法，优先使用回调函数，否则使用标准log
+func (f *Forwarder) log(level, logType, format string, args ...interface{}) {
+	message := fmt.Sprintf(format, args...)
+	if f.logCallback != nil {
+		f.logCallback(level, logType, message)
+	} else {
+		// 如果没有设置回调，使用标准log输出
+		log.Printf("[%s][%s] %s", level, logType, message)
+	}
+}
+
 // Start 启动端口转发
 func (f *Forwarder) Start() error {
 	if f.IsRunning {
@@ -59,11 +80,11 @@ func (f *Forwarder) Start() error {
 
 	if f.IsAutoProxy {
 		// 自动代理模式
-		log.Printf("启动自动代理 %s 转发: %s (自动选择 SOCKS5 代理)", 
+		f.log("INFO", "proxy", "启动自动代理 %s 转发: %s (自动选择 SOCKS5 代理)", 
 			f.Protocol, f.LocalAddr)
 	} else {
 		// 普通代理模式
-		log.Printf("启动 %s 转发: %s -> %s (通过 SOCKS5 代理 %s)", 
+		f.log("INFO", "proxy", "启动 %s 转发: %s -> %s (通过 SOCKS5 代理 %s)", 
 			f.Protocol, f.LocalAddr, f.RemoteAddr, f.SOCKS5Client.ProxyAddr)
 	}
 
@@ -82,7 +103,7 @@ func (f *Forwarder) Stop() error {
 		return fmt.Errorf("转发器未运行")
 	}
 
-	log.Printf("停止 %s 转发: %s -> %s", f.Protocol, f.LocalAddr, f.RemoteAddr)
+	f.log("INFO", "proxy", "停止 %s 转发: %s -> %s", f.Protocol, f.LocalAddr, f.RemoteAddr)
 
 	if f.Protocol == "tcp" {
 		return f.stopTCP()
@@ -122,7 +143,7 @@ func (f *Forwarder) tcpForwardLoop() {
 			if !f.IsRunning {
 				return
 			}
-			log.Printf("接受本地连接失败: %v", err)
+			f.log("ERROR", "proxy", "接受本地连接失败: %v", err)
 			continue
 		}
 
@@ -135,7 +156,7 @@ func (f *Forwarder) tcpForwardLoop() {
 func (f *Forwarder) handleTCPConnection(localConn net.Conn) {
 	defer localConn.Close()
 
-	log.Printf("收到本地TCP连接: %s -> %s", localConn.RemoteAddr(), f.LocalAddr)
+	f.log("INFO", "proxy", "收到本地TCP连接: %s -> %s", localConn.RemoteAddr(), f.LocalAddr)
 
 	// 如果是自动代理模式，作为SOCKS5服务器处理请求
 	if f.IsAutoProxy {
@@ -147,12 +168,12 @@ func (f *Forwarder) handleTCPConnection(localConn net.Conn) {
 	// 通过SOCKS5代理连接到远程服务器
 	proxyConn, err := f.SOCKS5Client.Dial("tcp", f.RemoteAddr)
 	if err != nil {
-		log.Printf("通过SOCKS5代理连接到远程服务器失败: %v", err)
+		f.log("ERROR", "proxy", "通过SOCKS5代理连接到远程服务器失败: %v", err)
 		return
 	}
 	defer proxyConn.Close()
 
-	log.Printf("成功通过SOCKS5代理连接到远程服务器: %s", f.RemoteAddr)
+	f.log("INFO", "proxy", "成功通过SOCKS5代理连接到远程服务器: %s", f.RemoteAddr)
 
 	// 设置超时
 	localConn.SetDeadline(time.Now().Add(30 * time.Second))
@@ -164,7 +185,7 @@ func (f *Forwarder) handleTCPConnection(localConn net.Conn) {
 			if !f.IsRunning {
 				return
 			}
-			log.Printf("本地到远程数据转发失败: %v", err)
+			f.log("ERROR", "proxy", "本地到远程数据转发失败: %v", err)
 		}
 	}()
 
@@ -172,10 +193,10 @@ func (f *Forwarder) handleTCPConnection(localConn net.Conn) {
 		if !f.IsRunning {
 			return
 		}
-		log.Printf("远程到本地数据转发失败: %v", err)
+		f.log("ERROR", "proxy", "远程到本地数据转发失败: %v", err)
 	}
 
-	log.Printf("TCP连接关闭: %s -> %s", localConn.RemoteAddr(), f.RemoteAddr)
+	f.log("INFO", "proxy", "TCP连接关闭: %s -> %s", localConn.RemoteAddr(), f.RemoteAddr)
 }
 
 // handleSOCKS5Request 处理SOCKS5请求（自动代理模式）
@@ -184,20 +205,20 @@ func (f *Forwarder) handleSOCKS5Request(conn net.Conn) {
 	handshake := make([]byte, 256)
 	n, err := conn.Read(handshake)
 	if err != nil {
-		log.Printf("读取SOCKS5握手请求失败: %v", err)
+		f.log("ERROR", "proxy", "读取SOCKS5握手请求失败: %v", err)
 		return
 	}
 
 	// 检查版本号
 	if handshake[0] != 0x05 {
-		log.Printf("不支持的SOCKS版本: %d", handshake[0])
+		f.log("ERROR", "proxy", "不支持的SOCKS版本: %d", handshake[0])
 		return
 	}
 
 	// 2. 回复客户端支持的认证方法
 	authReply := []byte{0x05, 0x00} // 只支持无认证
 	if _, err := conn.Write(authReply); err != nil {
-		log.Printf("发送SOCKS5认证回复失败: %v", err)
+		f.log("ERROR", "proxy", "发送SOCKS5认证回复失败: %v", err)
 		return
 	}
 
@@ -205,29 +226,29 @@ func (f *Forwarder) handleSOCKS5Request(conn net.Conn) {
 	request := make([]byte, 256)
 	n, err = conn.Read(request)
 	if err != nil {
-		log.Printf("读取SOCKS5请求失败: %v", err)
+		f.log("ERROR", "proxy", "读取SOCKS5请求失败: %v", err)
 		return
 	}
 
 	// 检查请求格式
 	if n < 10 || request[0] != 0x05 {
-		log.Printf("无效的SOCKS5请求")
+		f.log("ERROR", "proxy", "无效的SOCKS5请求")
 		return
 	}
 
 	// 解析目标地址
 	targetAddr, err := parseSOCKS5TargetAddr(request)
 	if err != nil {
-		log.Printf("解析SOCKS5目标地址失败: %v", err)
+		f.log("ERROR", "proxy", "解析SOCKS5目标地址失败: %v", err)
 		return
 	}
 
-	log.Printf("收到SOCKS5请求: %s -> %s", conn.RemoteAddr(), targetAddr)
+	f.log("INFO", "proxy", "收到SOCKS5请求: %s -> %s", conn.RemoteAddr(), targetAddr)
 
 	// 4. 获取选中的服务器
 	selectedServer, err := f.ServerManager.GetSelectedServer()
 	if err != nil {
-		log.Printf("获取选中的服务器失败: %v", err)
+		f.log("ERROR", "proxy", "获取选中的服务器失败: %v", err)
 		// 发送SOCKS5错误响应
 		errReply := []byte{0x05, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 		conn.Write(errReply)
@@ -244,7 +265,7 @@ func (f *Forwarder) handleSOCKS5Request(conn net.Conn) {
 	// 6. 通过选中的SOCKS5服务器连接到目标地址
 	proxyConn, err := socks5Client.Dial("tcp", targetAddr)
 	if err != nil {
-		log.Printf("通过选中的SOCKS5服务器连接到目标地址失败: %v", err)
+		f.log("ERROR", "proxy", "通过选中的SOCKS5服务器连接到目标地址失败: %v", err)
 		// 发送SOCKS5错误响应
 		errReply := []byte{0x05, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 		conn.Write(errReply)
@@ -255,11 +276,11 @@ func (f *Forwarder) handleSOCKS5Request(conn net.Conn) {
 	// 7. 发送SOCKS5成功响应
 	successReply := []byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 	if _, err := conn.Write(successReply); err != nil {
-		log.Printf("发送SOCKS5成功响应失败: %v", err)
+		f.log("ERROR", "proxy", "发送SOCKS5成功响应失败: %v", err)
 		return
 	}
 
-	log.Printf("成功通过SOCKS5代理连接到目标地址: %s", targetAddr)
+	f.log("INFO", "proxy", "成功通过SOCKS5代理连接到目标地址: %s (服务器: %s)", targetAddr, selectedServer.Name)
 
 	// 8. 设置超时
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
@@ -271,7 +292,7 @@ func (f *Forwarder) handleSOCKS5Request(conn net.Conn) {
 			if !f.IsRunning {
 				return
 			}
-			log.Printf("客户端到代理数据转发失败: %v", err)
+			f.log("ERROR", "proxy", "客户端到代理数据转发失败: %v", err)
 		}
 	}()
 
@@ -279,10 +300,10 @@ func (f *Forwarder) handleSOCKS5Request(conn net.Conn) {
 		if !f.IsRunning {
 			return
 		}
-		log.Printf("代理到客户端数据转发失败: %v", err)
+		f.log("ERROR", "proxy", "代理到客户端数据转发失败: %v", err)
 	}
 
-	log.Printf("SOCKS5连接关闭: %s -> %s", conn.RemoteAddr(), targetAddr)
+	f.log("INFO", "proxy", "SOCKS5连接关闭: %s -> %s", conn.RemoteAddr(), targetAddr)
 }
 
 // parseSOCKS5TargetAddr 解析SOCKS5请求中的目标地址
@@ -358,18 +379,18 @@ func (f *Forwarder) udpForwardLoop() {
 	// 启动UDP关联
 	tcpConn, proxyUDPAddr, err := f.SOCKS5Client.UDPAssociate()
 	if err != nil {
-		log.Printf("UDP关联失败: %v", err)
+		f.log("ERROR", "proxy", "UDP关联失败: %v", err)
 		return
 	}
 	defer tcpConn.Close()
 
-	log.Printf("成功获取代理服务器UDP地址: %s:%d", proxyUDPAddr.Host, proxyUDPAddr.Port)
+	f.log("INFO", "proxy", "成功获取代理服务器UDP地址: %s:%d", proxyUDPAddr.Host, proxyUDPAddr.Port)
 
 	// 连接到代理服务器的UDP端口
 	proxyNetAddr := fmt.Sprintf("%s:%d", proxyUDPAddr.Host, proxyUDPAddr.Port)
 	remoteAddr, err := net.ResolveUDPAddr("udp", proxyNetAddr)
 	if err != nil {
-		log.Printf("解析代理UDP地址失败: %v", err)
+		f.log("ERROR", "proxy", "解析代理UDP地址失败: %v", err)
 		return
 	}
 
@@ -384,7 +405,7 @@ func (f *Forwarder) udpForwardLoop() {
 			if !f.IsRunning {
 				return
 			}
-			log.Printf("读取本地UDP数据失败: %v", err)
+			f.log("ERROR", "proxy", "读取本地UDP数据失败: %v", err)
 			continue
 		}
 
@@ -392,18 +413,18 @@ func (f *Forwarder) udpForwardLoop() {
 		clientKey := clientAddr.String()
 		clientMap[clientKey] = clientAddr
 
-		log.Printf("收到本地UDP数据: %d 字节，来自 %s", n, clientKey)
+		f.log("INFO", "proxy", "收到本地UDP数据: %d 字节，来自 %s", n, clientKey)
 
 		// 封装SOCKS5 UDP数据包并发送到代理服务器
 		socks5Packet, err := buildUDPPacket(f.RemoteAddr, buf[:n])
 		if err != nil {
-			log.Printf("封装SOCKS5 UDP数据包失败: %v", err)
+			f.log("ERROR", "proxy", "封装SOCKS5 UDP数据包失败: %v", err)
 			continue
 		}
 
 		// 发送数据到代理服务器
 		if _, err := f.udpConn.WriteToUDP(socks5Packet, remoteAddr); err != nil {
-			log.Printf("发送UDP数据到代理服务器失败: %v", err)
+			f.log("ERROR", "proxy", "发送UDP数据到代理服务器失败: %v", err)
 			continue
 		}
 
@@ -428,7 +449,7 @@ func (f *Forwarder) handleUDPResponse(clientAddr, proxyAddr *net.UDPAddr) {
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 			return
 		}
-		log.Printf("读取UDP响应失败: %v", err)
+		f.log("ERROR", "proxy", "读取UDP响应失败: %v", err)
 		return
 	}
 
@@ -437,12 +458,12 @@ func (f *Forwarder) handleUDPResponse(clientAddr, proxyAddr *net.UDPAddr) {
 		return
 	}
 
-	log.Printf("收到来自代理服务器的UDP响应: %d 字节", n)
+	f.log("INFO", "proxy", "收到来自代理服务器的UDP响应: %d 字节", n)
 
 	// 解析SOCKS5 UDP响应
 	// 响应格式: RSV (2) + FRAG (1) + ATYP (1) + DST.ADDR + DST.PORT + DATA
 	if n < 10 {
-		log.Printf("UDP响应数据太短: %d 字节", n)
+		f.log("ERROR", "proxy", "UDP响应数据太短: %d 字节", n)
 		return
 	}
 
@@ -452,11 +473,11 @@ func (f *Forwarder) handleUDPResponse(clientAddr, proxyAddr *net.UDPAddr) {
 
 	// 发送响应数据到客户端
 	if _, err := f.udpConn.WriteToUDP(data, clientAddr); err != nil {
-		log.Printf("发送UDP响应到客户端失败: %v", err)
+		f.log("ERROR", "proxy", "发送UDP响应到客户端失败: %v", err)
 		return
 	}
 
-	log.Printf("成功转发UDP响应到客户端: %d 字节", len(data))
+	f.log("INFO", "proxy", "成功转发UDP响应到客户端: %d 字节", len(data))
 }
 
 // stopTCP 停止TCP转发

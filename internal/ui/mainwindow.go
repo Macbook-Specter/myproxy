@@ -5,18 +5,19 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/widget"
 	"myproxy.com/p/internal/database"
 )
 
-// LayoutConfig 布局配置
+// LayoutConfig 存储窗口布局的配置信息，包括各区域的分割比例。
+// 这些配置会持久化到数据库中，以便在应用重启后恢复用户的布局偏好。
 type LayoutConfig struct {
 	SubscriptionOffset float64 `json:"subscriptionOffset"` // 订阅管理区域比例 (默认0.2 = 20%)
 	ServerListOffset   float64 `json:"serverListOffset"`   // 服务器列表比例 (默认0.6667 = 66.7% of 75%)
 	StatusOffset       float64 `json:"statusOffset"`       // 状态信息比例 (默认0.9375 = 93.75% of 80%, 即5% of total)
 }
 
-// DefaultLayoutConfig 默认布局配置
+// DefaultLayoutConfig 返回默认的布局配置。
+// 默认布局：订阅管理 20%，服务器列表 50%，日志 25%，状态信息 5%。
 func DefaultLayoutConfig() *LayoutConfig {
 	return &LayoutConfig{
 		SubscriptionOffset: 0.2,    // 20%
@@ -25,7 +26,8 @@ func DefaultLayoutConfig() *LayoutConfig {
 	}
 }
 
-// MainWindow 主窗口
+// MainWindow 管理主窗口的布局和各个面板组件。
+// 它负责协调订阅管理、服务器列表、日志显示和状态信息四个主要区域的显示。
 type MainWindow struct {
 	appState          *AppState
 	subscriptionPanel *SubscriptionPanel
@@ -38,7 +40,12 @@ type MainWindow struct {
 	layoutConfig      *LayoutConfig    // 布局配置
 }
 
-// NewMainWindow 创建主窗口
+// NewMainWindow 创建并初始化主窗口。
+// 该方法会加载布局配置、创建各个面板组件，并建立它们之间的关联。
+// 参数：
+//   - appState: 应用状态实例
+//
+// 返回：初始化后的主窗口实例
 func NewMainWindow(appState *AppState) *MainWindow {
 	mw := &MainWindow{
 		appState: appState,
@@ -56,8 +63,9 @@ func NewMainWindow(appState *AppState) *MainWindow {
 	// 设置状态面板引用，以便服务器列表可以刷新状态
 	mw.serverListPanel.SetStatusPanel(mw.statusPanel)
 
-	// 设置主窗口引用到 AppState，以便其他组件可以刷新日志面板
+	// 设置主窗口和日志面板引用到 AppState，以便其他组件可以刷新日志面板
 	appState.MainWindow = mw
+	appState.LogsPanel = mw.logsPanel
 
 	return mw
 }
@@ -98,7 +106,9 @@ func (mw *MainWindow) saveLayoutConfig() {
 	database.SetLayoutConfig("layout_config", string(configJSON))
 }
 
-// Build 构建主窗口 UI
+// Build 构建并返回主窗口的 UI 组件树。
+// 该方法使用自定义 Border 布局，支持百分比控制各区域的大小。
+// 返回：主窗口的根容器组件
 func (mw *MainWindow) Build() fyne.CanvasObject {
 	// 服务器列表和日志的垂直分割
 	serverListArea := mw.serverListPanel.Build()
@@ -151,12 +161,8 @@ func (mw *MainWindow) Build() fyne.CanvasObject {
 	)
 }
 
-// createServerManagementTab 创建服务器管理标签页（已废弃，不再使用）
-func (mw *MainWindow) createServerManagementTab() fyne.CanvasObject {
-	return widget.NewLabel("")
-}
-
-// Refresh 刷新所有面板
+// Refresh 刷新主窗口的所有面板，包括服务器列表、日志显示和订阅管理。
+// 该方法会更新数据绑定，使 UI 自动反映最新的应用状态。
 func (mw *MainWindow) Refresh() {
 	mw.serverListPanel.Refresh()
 	mw.logsPanel.Refresh() // 刷新日志面板，显示最新日志
@@ -168,7 +174,8 @@ func (mw *MainWindow) Refresh() {
 	}
 }
 
-// SaveLayoutConfig 保存布局配置
+// SaveLayoutConfig 保存当前的布局配置到数据库。
+// 该方法会在窗口关闭时自动调用，以保存用户的布局偏好。
 func (mw *MainWindow) SaveLayoutConfig() {
 	if mw.mainSplit != nil {
 		mw.layoutConfig.ServerListOffset = mw.mainSplit.Offset
@@ -178,7 +185,8 @@ func (mw *MainWindow) SaveLayoutConfig() {
 	mw.saveLayoutConfig()
 }
 
-// GetLayoutConfig 获取布局配置
+// GetLayoutConfig 返回当前的布局配置。
+// 返回：布局配置实例，如果未初始化则返回默认配置
 func (mw *MainWindow) GetLayoutConfig() *LayoutConfig {
 	return mw.layoutConfig
 }

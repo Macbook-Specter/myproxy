@@ -6,8 +6,8 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// StatusPanel 状态信息面板（显示代理状态和端口信息）
-// 使用 Fyne 双向绑定，自动同步数据更新
+// StatusPanel 显示代理状态、端口和当前服务器信息。
+// 它使用 Fyne 的双向数据绑定机制，当应用状态更新时自动刷新显示。
 type StatusPanel struct {
 	appState         *AppState
 	proxyStatusLabel *widget.Label
@@ -15,7 +15,12 @@ type StatusPanel struct {
 	serverNameLabel  *widget.Label
 }
 
-// NewStatusPanel 创建状态信息面板
+// NewStatusPanel 创建并初始化状态信息面板。
+// 该方法会创建绑定到应用状态的标签组件，实现自动更新。
+// 参数：
+//   - appState: 应用状态实例
+//
+// 返回：初始化后的状态面板实例
 func NewStatusPanel(appState *AppState) *StatusPanel {
 	sp := &StatusPanel{
 		appState: appState,
@@ -37,7 +42,8 @@ func NewStatusPanel(appState *AppState) *StatusPanel {
 	return sp
 }
 
-// Build 构建状态面板 UI
+// Build 构建并返回状态信息面板的 UI 组件。
+// 返回：包含代理状态、端口和服务器名称的水平布局容器
 func (sp *StatusPanel) Build() fyne.CanvasObject {
 	// 使用水平布局显示所有信息，所有元素横向排列
 	// 使用 HBox 布局，元素从左到右排列，保持最小尺寸
@@ -65,7 +71,9 @@ func (sp *StatusPanel) Build() fyne.CanvasObject {
 	return result
 }
 
-// Refresh 刷新状态信息（现在通过绑定自动更新，此方法保留用于兼容性）
+// Refresh 刷新状态信息显示。
+// 注意：由于使用了双向数据绑定，通常只需要更新绑定数据即可，UI 会自动更新。
+// 此方法保留用于兼容性，实际更新通过 AppState.UpdateProxyStatus() 完成。
 func (sp *StatusPanel) Refresh() {
 	// 使用双向绑定后，只需要更新绑定数据，UI 会自动更新
 	if sp.appState != nil {

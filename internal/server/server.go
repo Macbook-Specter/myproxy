@@ -22,6 +22,26 @@ func NewServerManager(config *config.Config) *ServerManager {
 	}
 }
 
+// LoadServersFromDB 将数据库中的服务器加载到内存配置。
+// 这在应用启动时调用，确保 UI 能展示数据库里已有的服务器。
+func (sm *ServerManager) LoadServersFromDB() error {
+	servers, err := database.GetAllServers()
+	if err != nil {
+		return fmt.Errorf("加载服务器列表失败: %w", err)
+	}
+
+	sm.config.Servers = servers
+	sm.config.SelectedServerID = ""
+	for _, srv := range servers {
+		if srv.Selected {
+			sm.config.SelectedServerID = srv.ID
+			break
+		}
+	}
+
+	return nil
+}
+
 // AddServer 添加服务器
 func (sm *ServerManager) AddServer(server config.Server) error {
 	// 先添加到内存配置

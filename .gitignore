@@ -66,3 +66,6 @@ out/
 .env
 .env.local
 .env.*.local
+
+# 工具生成的临时目录
+.trae/
