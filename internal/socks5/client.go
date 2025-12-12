@@ -43,13 +43,14 @@ func (c *SOCKS5Client) Dial(network, addr string) (net.Conn, error) {
 	}
 
 	// --- 阶段 1: 协商 ---
-	if err := c.negotiate(conn); err != nil {
+	selectedMethod, err := c.negotiate(conn)
+	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("SOCKS5 协商失败: %w", err)
 	}
 
-	// --- 阶段 2: 认证 (如果需要) ---
-	if c.Username != "" || c.Password != "" {
+	// --- 阶段 2: 认证 (如果服务器选择了 AuthUserPass) ---
+	if selectedMethod == AuthUserPass {
 		if err := c.authenticate(conn); err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("SOCKS5 认证失败: %w", err)
@@ -67,7 +68,8 @@ func (c *SOCKS5Client) Dial(network, addr string) (net.Conn, error) {
 }
 
 // 阶段 1: 协商
-func (c *SOCKS5Client) negotiate(conn net.Conn) error {
+// 返回服务器选择的认证方法
+func (c *SOCKS5Client) negotiate(conn net.Conn) (byte, error) {
 	// 客户端发送: VER (1) + NMETHODS (1) + METHODS (N)
 	methods := []byte{AuthNoAuth} // 默认支持无认证
 	if c.Username != "" || c.Password != "" {
@@ -78,26 +80,31 @@ func (c *SOCKS5Client) negotiate(conn net.Conn) error {
 	buf = append(buf, methods...)
 
 	if _, err := conn.Write(buf); err != nil {
-		return err
+		return 0, err
 	}
 
 	// 服务器接收: VER (1) + METHOD (1)
 	reply := make([]byte, 2)
 	if _, err := io.ReadFull(conn, reply); err != nil {
-		return err
+		return 0, err
 	}
 
 	if reply[0] != Version {
-		return fmt.Errorf("SOCKS 版本不匹配: %d", reply[0])
+		return 0, fmt.Errorf("SOCKS 版本不匹配: %d", reply[0])
 	}
 
 	// 检查服务器选择的认证方法是否支持
-	if reply[1] == AuthNoAuth {
-		return nil
-	} else if reply[1] == AuthUserPass {
-		return nil // 需要进行用户密码认证
+	selectedMethod := reply[1]
+	if selectedMethod == AuthNoAuth {
+		return selectedMethod, nil
+	} else if selectedMethod == AuthUserPass {
+		// 如果服务器选择了用户名/密码认证，但客户端没有提供用户名或密码，返回错误
+		if c.Username == "" && c.Password == "" {
+			return 0, fmt.Errorf("服务器要求用户名/密码认证，但未提供用户名或密码")
+		}
+		return selectedMethod, nil
 	} else {
-		return fmt.Errorf("服务器选择了不支持的认证方法: %d", reply[1])
+		return 0, fmt.Errorf("服务器选择了不支持的认证方法: %d", selectedMethod)
 	}
 }
 
@@ -213,14 +220,14 @@ func (c *SOCKS5Client) UDPAssociate() (net.Conn, ProxyUDPAddr, error) {
 	}
 
 	// --- 阶段 1: 协商 ---
-	if err := c.negotiate(conn); err != nil {
+	selectedMethod, err := c.negotiate(conn)
+	if err != nil {
 		conn.Close()
 		return nil, ProxyUDPAddr{}, fmt.Errorf("SOCKS5 协商失败: %w", err)
 	}
 
-	// --- 阶段 2: 认证 (如果需要) ---
-	// 假设 authenticate 方法已经存在，逻辑与 TCP Connect 相同
-	if c.Username != "" || c.Password != "" {
+	// --- 阶段 2: 认证 (如果服务器选择了 AuthUserPass) ---
+	if selectedMethod == AuthUserPass {
 		if err := c.authenticate(conn); err != nil {
 			conn.Close()
 			return nil, ProxyUDPAddr{}, fmt.Errorf("SOCKS5 认证失败: %w", err)
