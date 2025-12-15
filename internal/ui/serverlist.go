@@ -17,10 +17,11 @@ import (
 // ServerListPanel 管理服务器列表的显示和操作。
 // 它支持服务器选择、延迟测试、代理启动/停止等功能，并提供右键菜单操作。
 type ServerListPanel struct {
-	appState       *AppState
-	serverList     *widget.List
-	onServerSelect func(server config.Server)
-	statusPanel    *StatusPanel // 状态面板引用（用于刷新）
+	appState           *AppState
+	serverList         *widget.List
+	subscriptionSelect *widget.Select // 订阅选择下拉菜单
+	onServerSelect     func(server config.Server)
+	statusPanel        *StatusPanel // 状态面板引用（用于刷新）
 }
 
 // NewServerListPanel 创建并初始化服务器列表面板。
@@ -69,10 +70,16 @@ func (slp *ServerListPanel) Build() fyne.CanvasObject {
 	startProxyBtn := widget.NewButton("启动代理", slp.onStartProxyFromSelected)
 	stopProxyBtn := widget.NewButton("停止代理", slp.onStopProxy)
 
+	// 订阅选择下拉菜单
+	slp.subscriptionSelect = widget.NewSelect([]string{"加载中..."}, nil)
+	slp.updateSubscriptionSelect(slp.subscriptionSelect)
+
 	// 服务器列表标题和按钮
 	headerArea := container.NewHBox(
 		widget.NewLabel("服务器列表"),
 		layout.NewSpacer(),
+		widget.NewLabel("订阅："),
+		slp.subscriptionSelect,
 		testAllBtn,
 		startProxyBtn,
 		stopProxyBtn,
@@ -89,6 +96,63 @@ func (slp *ServerListPanel) Build() fyne.CanvasObject {
 		nil,
 		serverScroll,
 	)
+}
+
+// updateSubscriptionSelect 更新订阅选择下拉菜单
+func (slp *ServerListPanel) updateSubscriptionSelect(selectWidget *widget.Select) {
+	// 获取所有订阅
+	subscriptions, err := database.GetAllSubscriptions()
+	if err != nil {
+		selectWidget.Options = []string{"全部"}
+		selectWidget.Refresh()
+		return
+	}
+
+	// 创建选项列表，第一个选项为"全部"
+	options := []string{"全部"}
+	optionToID := map[string]int64{"全部": 0}
+
+	// 添加所有订阅
+	for _, sub := range subscriptions {
+		option := fmt.Sprintf("%s", sub.Label)
+		options = append(options, option)
+		optionToID[option] = sub.ID
+	}
+
+	// 设置选项
+	selectWidget.Options = options
+
+	// 设置当前选中项
+	currentSubscriptionID := slp.appState.ServerManager.GetSelectedSubscriptionID()
+	if currentSubscriptionID == 0 {
+		selectWidget.SetSelected("全部")
+	} else {
+		for option, id := range optionToID {
+			if id == currentSubscriptionID {
+				selectWidget.SetSelected(option)
+				break
+			}
+		}
+	}
+
+	// 设置选择事件处理函数
+	selectWidget.OnChanged = func(selected string) {
+		// 获取选中的订阅ID
+		subscriptionID := optionToID[selected]
+
+		// 设置选中的订阅
+		slp.appState.ServerManager.SetSelectedSubscriptionID(subscriptionID)
+
+		// 刷新服务器列表
+		slp.Refresh()
+
+		// 更新状态面板
+		if slp.statusPanel != nil {
+			slp.statusPanel.Refresh()
+		}
+	}
+
+	selectWidget.Refresh()
 }
 
 // Refresh 刷新服务器列表的显示，使 UI 反映最新的服务器数据。
@@ -122,24 +186,8 @@ func (slp *ServerListPanel) updateServerItem(id widget.ListItemID, obj fyne.Canv
 	item.panel = slp
 	item.id = id
 
-	// 构建显示文本
-	prefix := ""
-	if srv.Selected {
-		prefix = "★ "
-	}
-	if !srv.Enabled {
-		prefix += "[禁用] "
-	}
-
-	delay := "未测"
-	if srv.Delay > 0 {
-		delay = fmt.Sprintf("%d ms", srv.Delay)
-	} else if srv.Delay < 0 {
-		delay = "失败"
-	}
-
-	text := fmt.Sprintf("%s%s  %s:%d  [%s]", prefix, srv.Name, srv.Addr, srv.Port, delay)
-	item.SetText(text)
+	// 使用新的Update方法更新多列信息
+	item.Update(srv)
 }
 
 // onSelected 服务器选中事件
@@ -520,18 +568,80 @@ func (slp *ServerListPanel) getSelectedIndex() widget.ListItemID {
 	return -1
 }
 
-// ServerListItem 自定义服务器列表项（支持右键菜单）
+// ServerListItem 自定义服务器列表项（支持右键菜单和多列显示）
 type ServerListItem struct {
 	widget.BaseWidget
-	label *widget.Label
-	id    widget.ListItemID
-	panel *ServerListPanel
+	id          widget.ListItemID
+	panel       *ServerListPanel
+	container   *fyne.Container
+	nameLabel   *widget.Label
+	addrLabel   *widget.Label
+	portLabel   *widget.Label
+	userLabel   *widget.Label
+	delayLabel  *widget.Label
+	statusLabel *widget.Label
 }
 
 // NewServerListItem 创建新的服务器列表项
 func NewServerListItem() *ServerListItem {
+	// 创建各列标签
+	nameLabel := widget.NewLabel("")
+	nameLabel.Wrapping = fyne.TextTruncate
+	nameLabel.TextStyle = fyne.TextStyle{Bold: true}
+
+	addrLabel := widget.NewLabel("")
+	addrLabel.Wrapping = fyne.TextTruncate
+
+	portLabel := widget.NewLabel("")
+	portLabel.Alignment = fyne.TextAlignCenter
+
+	userLabel := widget.NewLabel("")
+	userLabel.Wrapping = fyne.TextTruncate
+
+	delayLabel := widget.NewLabel("")
+	delayLabel.Alignment = fyne.TextAlignCenter
+
+	statusLabel := widget.NewLabel("")
+	statusLabel.Alignment = fyne.TextAlignCenter
+
+	// 创建容器，使用网格布局，确保所有列都能显示
+	// 为每列添加一个包含标签的固定大小容器
+	nameContainer := container.NewMax(nameLabel)
+	nameContainer.Resize(fyne.NewSize(180, 40))
+
+	addrContainer := container.NewMax(addrLabel)
+	addrContainer.Resize(fyne.NewSize(120, 40))
+
+	portContainer := container.NewMax(portLabel)
+	portContainer.Resize(fyne.NewSize(60, 40))
+
+	userContainer := container.NewMax(userLabel)
+	userContainer.Resize(fyne.NewSize(100, 40))
+
+	delayContainer := container.NewMax(delayLabel)
+	delayContainer.Resize(fyne.NewSize(80, 40))
+
+	statusContainer := container.NewMax(statusLabel)
+	statusContainer.Resize(fyne.NewSize(80, 40))
+
+	// 使用网格布局组织各列容器
+	container := container.NewGridWithColumns(6,
+		nameContainer,
+		addrContainer,
+		portContainer,
+		userContainer,
+		delayContainer,
+		statusContainer,
+	)
+
 	item := &ServerListItem{
-		label: widget.NewLabel(""),
+		container:   container,
+		nameLabel:   nameLabel,
+		addrLabel:   addrLabel,
+		portLabel:   portLabel,
+		userLabel:   userLabel,
+		delayLabel:  delayLabel,
+		statusLabel: statusLabel,
 	}
 	item.ExtendBaseWidget(item)
 	return item
@@ -539,7 +649,7 @@ func NewServerListItem() *ServerListItem {
 
 // CreateRenderer 创建渲染器
 func (s *ServerListItem) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(s.label)
+	return widget.NewSimpleRenderer(s.container)
 }
 
 // TappedSecondary 处理右键点击事件
@@ -550,9 +660,46 @@ func (s *ServerListItem) TappedSecondary(pe *fyne.PointEvent) {
 	s.panel.onRightClick(s.id, pe)
 }
 
-// SetText 设置文本
-func (s *ServerListItem) SetText(text string) {
+// Update  更新服务器列表项的信息
+func (s *ServerListItem) Update(server config.Server) {
 	fyne.Do(func() {
-		s.label.SetText(text)
+		// 服务器名称（带选中标记）
+		prefix := ""
+		if server.Selected {
+			prefix = "★ "
+		}
+		if !server.Enabled {
+			prefix += "[禁用] "
+		}
+		s.nameLabel.SetText(prefix + server.Name)
+
+		// 服务器地址
+		s.addrLabel.SetText(server.Addr)
+
+		// 端口
+		s.portLabel.SetText(strconv.Itoa(server.Port))
+
+		// 用户名
+		username := server.Username
+		if username == "" {
+			username = "无"
+		}
+		s.userLabel.SetText(username)
+
+		// 延迟
+		delayText := "未测"
+		if server.Delay > 0 {
+			delayText = fmt.Sprintf("%d ms", server.Delay)
+		} else if server.Delay < 0 {
+			delayText = "失败"
+		}
+		s.delayLabel.SetText(delayText)
+
+		// 状态
+		status := "启用"
+		if !server.Enabled {
+			status = "禁用"
+		}
+		s.statusLabel.SetText(status)
 	})
 }

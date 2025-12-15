@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -16,20 +17,475 @@ import (
 	"myproxy.com/p/internal/server"
 )
 
+// ServerParser 服务器配置解析器接口
+type ServerParser interface {
+	// Parse 解析服务器配置字符串，返回服务器配置和错误
+	Parse(content string) (*config.Server, error)
+}
+
+// VMessParser VMess协议解析器
+type VMessParser struct{}
+
+// Parse 解析VMess协议
+func (p *VMessParser) Parse(content string) (*config.Server, error) {
+	// 移除前缀
+	vmessData := strings.TrimPrefix(content, "vmess://")
+	// 解码Base64
+	decoded, err := base64.StdEncoding.DecodeString(vmessData)
+	if err != nil {
+		// 尝试URL安全的Base64解码
+		decoded, err = base64.URLEncoding.DecodeString(vmessData)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// 解析JSON - 包含所有字段
+	var vmessConfig struct {
+		V    string `json:"v"`    // 版本
+		Ps   string `json:"ps"`   // 备注/名称
+		Add  string `json:"add"`  // 地址
+		Port string `json:"port"` // 端口（字符串类型）
+		Id   string `json:"id"`   // UUID
+		Aid  string `json:"aid"`  // AlterID（字符串类型，可能是 "0"）
+		Net  string `json:"net"`  // 传输协议: tcp, kcp, ws, h2, quic, grpc
+		Type string `json:"type"` // 伪装类型: none, http, srtp, utp, wechat-video
+		Host string `json:"host"` // 伪装域名
+		Path string `json:"path"` // 路径
+		Tls  string `json:"tls"`  // TLS: "" 或 "tls"
+	}
+
+	decodedStr := string(decoded)
+
+	if err := json.Unmarshal(decoded, &vmessConfig); err != nil {
+		return nil, err
+	}
+
+	// 将port转换为整数
+	port, err := strconv.Atoi(vmessConfig.Port)
+	if err != nil {
+		return nil, err
+	}
+
+	// 将aid转换为整数
+	aid := 0
+	if vmessConfig.Aid != "" {
+		if aidInt, err := strconv.Atoi(vmessConfig.Aid); err == nil {
+			aid = aidInt
+		}
+	}
+
+	// 生成服务器ID（使用 addr:port:uuid）
+	serverID := server.GenerateServerID(vmessConfig.Add, port, vmessConfig.Id)
+
+	// 创建服务器配置，包含所有字段
+	s := &config.Server{
+		ID:           serverID,
+		Name:         vmessConfig.Ps,
+		Addr:         vmessConfig.Add,
+		Port:         port,
+		Username:     vmessConfig.Id, // VMess 使用 UUID 作为标识
+		Password:     "",
+		Delay:        0,
+		Selected:     false,
+		Enabled:      true,
+		ProtocolType: "vmess",
+		// VMess 协议字段
+		VMessVersion:  vmessConfig.V,
+		VMessUUID:     vmessConfig.Id,
+		VMessAlterID:  aid,
+		VMessSecurity: "auto", // 默认加密方式
+		VMessNetwork:  vmessConfig.Net,
+		VMessType:     vmessConfig.Type,
+		VMessHost:     vmessConfig.Host,
+		VMessPath:     vmessConfig.Path,
+		VMessTLS:      vmessConfig.Tls,
+		// 保存原始配置 JSON
+		RawConfig: decodedStr,
+	}
+
+	// 如果名称为空，使用地址:端口作为名称
+	if s.Name == "" {
+		s.Name = fmt.Sprintf("%s:%d", s.Addr, s.Port)
+	}
+
+	return s, nil
+}
+
+// SSConfig SS协议配置
+type SSConfig struct {
+	Cipher     string
+	Password   string
+	Addr       string
+	Port       int
+	Plugin     string
+	PluginOpts string
+}
+
+// SSParser SS协议解析器
+type SSParser struct{}
+
+// Parse 解析SS协议
+func (p *SSParser) Parse(content string) (*config.Server, error) {
+	// 移除前缀
+	ssData := strings.TrimPrefix(content, "ss://")
+
+	// 处理可能的备注部分
+	ssDataWithoutRemark := ssData
+	if idx := strings.Index(ssData, "#"); idx != -1 {
+		ssDataWithoutRemark = ssData[:idx]
+	}
+
+	// 找到 @ 符号，将字符串分为两部分
+	base64Part, addrPortPart, found := strings.Cut(ssDataWithoutRemark, "@")
+	var cipher, password, cipherPasswdPart string
+
+	if !found {
+		// 如果没有 @ 符号，说明整个部分都是 Base64 编码的
+		// 解码Base64 - 处理可能的填充问题
+		base64Str := ssDataWithoutRemark
+		// 确保Base64字符串的长度是4的倍数，必要时添加填充字符
+		for len(base64Str)%4 != 0 {
+			base64Str += "="
+		}
+		decoded, err := base64.StdEncoding.DecodeString(base64Str)
+		if err != nil {
+			// 尝试URL安全的Base64解码
+			decoded, err = base64.URLEncoding.DecodeString(base64Str)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		ssStr := string(decoded)
+		// 解析内部结构：cipher:password@addr:port
+		cipherPasswdPart, addrPortPart, found = strings.Cut(ssStr, "@")
+		if !found {
+			return nil, fmt.Errorf("invalid SS format: missing @ separator in decoded string")
+		}
+		cipher, password, found = strings.Cut(cipherPasswdPart, ":")
+		if !found {
+			return nil, fmt.Errorf("invalid SS format: missing cipher:password")
+		}
+	} else {
+		// 解码Base64
+		decoded, err := base64.StdEncoding.DecodeString(base64Part)
+		if err != nil {
+			// 尝试URL安全的Base64解码
+			decoded, err = base64.URLEncoding.DecodeString(base64Part)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		ssStr := string(decoded)
+		// 解析SS配置
+		// 格式：cipher:password
+		cipher, password, found = strings.Cut(ssStr, ":")
+		if !found {
+			return nil, fmt.Errorf("invalid SS format: missing cipher:password")
+		}
+	}
+
+	// 解析地址和端口，以及可能的参数
+	addrPort, pluginPart, _ := strings.Cut(addrPortPart, "?")
+	addr, portStr, found := strings.Cut(addrPort, ":")
+	if !found {
+		return nil, fmt.Errorf("invalid SS format: missing addr:port")
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid SS port: %w", err)
+	}
+
+	// 解析插件参数
+	var plugin, pluginOpts string
+	if pluginPart != "" {
+		pluginParams := strings.Split(pluginPart, "&")
+		for _, param := range pluginParams {
+			key, value, _ := strings.Cut(param, "=")
+			key = strings.TrimSpace(key)
+			value = strings.TrimSpace(value)
+
+			if key == "plugin" {
+				plugin = value
+			} else if key == "plugin-opts" {
+				pluginOpts = value
+			}
+		}
+	}
+
+	// 生成服务器ID
+	serverID := server.GenerateServerID(addr, port, password)
+
+	// 创建服务器配置
+	s := &config.Server{
+		ID:           serverID,
+		Name:         fmt.Sprintf("%s:%d", addr, port),
+		Addr:         addr,
+		Port:         port,
+		Username:     password, // SS使用密码作为标识
+		Password:     password,
+		Delay:        0,
+		Selected:     false,
+		Enabled:      true,
+		ProtocolType: "ss",
+		// SS 协议字段
+		SSMethod:     cipher,
+		SSPlugin:     plugin,
+		SSPluginOpts: pluginOpts,
+		// 保存原始配置
+		RawConfig: content,
+	}
+
+	// 设置名称（从备注中获取）
+	if idx := strings.Index(ssData, "#"); idx != -1 {
+		remark := ssData[idx+1:]
+		if decodedRemark, err := url.QueryUnescape(remark); err == nil {
+			s.Name = decodedRemark
+		} else {
+			s.Name = remark
+		}
+	}
+
+	return s, nil
+}
+
+// TrojanConfig Trojan协议配置
+type TrojanConfig struct {
+	Password      string
+	Addr          string
+	Port          int
+	SNI           string
+	Alpn          string
+	AllowInsecure bool
+}
+
+// TrojanParser Trojan协议解析器
+type TrojanParser struct{}
+
+// Parse 解析Trojan协议
+func (p *TrojanParser) Parse(content string) (*config.Server, error) {
+	// 移除前缀
+	trojanData := strings.TrimPrefix(content, "trojan://")
+
+	// 处理可能的备注部分
+	trojanDataWithoutRemark := trojanData
+	name := ""
+	if idx := strings.Index(trojanData, "#"); idx != -1 {
+		trojanDataWithoutRemark = trojanData[:idx]
+		name = trojanData[idx+1:]
+		// 解码备注
+		if decodedName, err := url.QueryUnescape(name); err == nil {
+			name = decodedName
+		}
+	}
+
+	// 解析密码和地址端口部分，以及可能的参数
+	// 格式：password@addr:port?param1=value1&param2=value2
+	passwordAddrPart, paramPart, _ := strings.Cut(trojanDataWithoutRemark, "?")
+
+	// 解析密码和地址端口
+	password, addrPort, found := strings.Cut(passwordAddrPart, "@")
+	if !found {
+		return nil, fmt.Errorf("invalid Trojan format: missing @ separator")
+	}
+
+	// 解析地址和端口
+	addr, portStr, found := strings.Cut(addrPort, ":")
+	if !found {
+		return nil, fmt.Errorf("invalid Trojan format: missing addr:port")
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Trojan port: %w", err)
+	}
+
+	// 解析参数部分
+	var sni, alpn string
+	allowInsecure := false
+
+	if paramPart != "" {
+		params := strings.Split(paramPart, "&")
+		for _, param := range params {
+			key, value, _ := strings.Cut(param, "=")
+			key = strings.TrimSpace(key)
+			value = strings.TrimSpace(value)
+
+			switch key {
+			case "sni":
+				sni = value
+			case "alpn":
+				alpn = value
+			case "allowInsecure":
+				allowInsecure = value == "1" || strings.ToLower(value) == "true"
+			}
+		}
+	}
+
+	// 生成服务器ID
+	serverID := server.GenerateServerID(addr, port, password)
+
+	// 创建服务器配置
+	s := &config.Server{
+		ID:           serverID,
+		Name:         name,
+		Addr:         addr,
+		Port:         port,
+		Username:     password, // Trojan使用密码作为标识
+		Password:     password,
+		Delay:        0,
+		Selected:     false,
+		Enabled:      true,
+		ProtocolType: "trojan",
+		// Trojan 协议字段
+		TrojanPassword:      password,
+		TrojanSNI:           sni,
+		TrojanAlpn:          alpn,
+		TrojanAllowInsecure: allowInsecure,
+		// 保存原始配置
+		RawConfig: content,
+	}
+
+	// 如果名称为空，使用地址:端口作为名称
+	if s.Name == "" {
+		s.Name = fmt.Sprintf("%s:%d", s.Addr, s.Port)
+	}
+
+	return s, nil
+}
+
+// SOCKS5Parser SOCKS5协议解析器
+type SOCKS5Parser struct{}
+
+// Parse 解析SOCKS5协议
+func (p *SOCKS5Parser) Parse(content string) (*config.Server, error) {
+	socks5Regex := regexp.MustCompile(`^socks5://(?:([^:]+):([^@]+)@)?([^:]+):(\d+)$`)
+	matches := socks5Regex.FindStringSubmatch(content)
+	if matches == nil {
+		return nil, fmt.Errorf("invalid SOCKS5 format")
+	}
+
+	username := matches[1]
+	password := matches[2]
+	addr := matches[3]
+	portStr := matches[4]
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid SOCKS5 port: %w", err)
+	}
+
+	// 生成服务器ID
+	serverID := server.GenerateServerID(addr, port, username)
+
+	// 创建服务器配置
+	s := &config.Server{
+		ID:           serverID,
+		Name:         fmt.Sprintf("%s:%d", addr, port),
+		Addr:         addr,
+		Port:         port,
+		Username:     username,
+		Password:     password,
+		Delay:        0,
+		Selected:     false,
+		Enabled:      true,
+		ProtocolType: "socks5",
+		RawConfig:    content,
+	}
+
+	return s, nil
+}
+
+// SimpleParser 简单格式解析器
+type SimpleParser struct{}
+
+// Parse 解析简单格式
+func (p *SimpleParser) Parse(content string) (*config.Server, error) {
+	simpleRegex := regexp.MustCompile(`^([^:]+):(\d+)\s+([^\s]+)\s+([^\s]+)$`)
+	matches := simpleRegex.FindStringSubmatch(content)
+	if matches == nil {
+		return nil, fmt.Errorf("invalid simple format")
+	}
+
+	addr := matches[1]
+	portStr := matches[2]
+	username := matches[3]
+	password := matches[4]
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid simple port: %w", err)
+	}
+
+	// 生成服务器ID
+	serverID := server.GenerateServerID(addr, port, username)
+
+	// 创建服务器配置
+	s := &config.Server{
+		ID:           serverID,
+		Name:         fmt.Sprintf("%s:%d", addr, port),
+		Addr:         addr,
+		Port:         port,
+		Username:     username,
+		Password:     password,
+		Delay:        0,
+		Selected:     false,
+		Enabled:      true,
+		ProtocolType: "socks5", // 简单格式默认为 SOCKS5
+		RawConfig:    content,
+	}
+
+	return s, nil
+}
+
 // SubscriptionManager 订阅管理器
 type SubscriptionManager struct {
 	serverManager *server.ServerManager
 	client        *http.Client
+	parsers       map[string]ServerParser  // 服务器配置解析器映射，key为协议前缀
+	subscriptions []*database.Subscription // 订阅列表
 }
 
 // NewSubscriptionManager 创建新的订阅管理器
 func NewSubscriptionManager(serverManager *server.ServerManager) *SubscriptionManager {
-	return &SubscriptionManager{
+	// 注册所有支持的解析器
+	parsers := make(map[string]ServerParser)
+	parsers["vmess://"] = &VMessParser{}
+	parsers["ss://"] = &SSParser{}
+	parsers["trojan://"] = &TrojanParser{}
+	parsers["socks5://"] = &SOCKS5Parser{}
+
+	sm := &SubscriptionManager{
 		serverManager: serverManager,
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		parsers: parsers,
 	}
+
+	// 初始化时从数据库加载订阅列表
+	sm.LoadSubscriptionsFromDB()
+
+	return sm
+}
+
+// LoadSubscriptionsFromDB 从数据库加载订阅列表到内存
+func (sm *SubscriptionManager) LoadSubscriptionsFromDB() error {
+	subscriptions, err := database.GetAllSubscriptions()
+	if err != nil {
+		return fmt.Errorf("加载订阅列表失败: %w", err)
+	}
+
+	sm.subscriptions = subscriptions
+	return nil
+}
+
+// GetSubscriptions 获取所有订阅列表
+func (sm *SubscriptionManager) GetSubscriptions() []*database.Subscription {
+	return sm.subscriptions
 }
 
 // FetchSubscription 从URL获取订阅服务器列表
@@ -75,6 +531,11 @@ func (sm *SubscriptionManager) FetchSubscription(url string, label ...string) ([
 		if err := database.AddOrUpdateServer(s, subscriptionID); err != nil {
 			return nil, fmt.Errorf("保存服务器到数据库失败: %w", err)
 		}
+	}
+
+	// 更新内存中的订阅列表
+	if err := sm.LoadSubscriptionsFromDB(); err != nil {
+		return nil, fmt.Errorf("更新订阅列表失败: %w", err)
 	}
 
 	return servers, nil
@@ -149,6 +610,11 @@ func (sm *SubscriptionManager) UpdateSubscription(url string, label ...string) e
 		}
 	}
 
+	// 更新内存中的订阅列表
+	if err := sm.LoadSubscriptionsFromDB(); err != nil {
+		return fmt.Errorf("更新订阅列表失败: %w", err)
+	}
+
 	return nil
 }
 
@@ -159,9 +625,6 @@ func (sm *SubscriptionManager) parseSubscription(content string) ([]config.Serve
 	if err == nil {
 		content = string(decoded)
 	}
-	fmt.Println(content)
-
-	// 尝试不同的订阅格式
 
 	// 1. 尝试JSON格式
 	var jsonServers []struct {
@@ -210,143 +673,29 @@ func (sm *SubscriptionManager) parseSubscription(content string) ([]config.Serve
 			continue
 		}
 
-		// 尝试解析VMess格式
-		if strings.HasPrefix(line, "vmess://") {
-			// 移除前缀
-			vmessData := strings.TrimPrefix(line, "vmess://")
-			// 解码Base64
-			decoded, err := base64.StdEncoding.DecodeString(vmessData)
-			if err != nil {
-				// 尝试URL安全的Base64解码
-				decoded, err = base64.URLEncoding.DecodeString(vmessData)
-				if err != nil {
-					continue
-				}
+		// 使用注册的解析器解析服务器配置
+		var parsedServer *config.Server
+
+		// 直接根据前缀获取解析器
+		// 查找字符串中第一个 "://" 出现的位置
+		if idx := strings.Index(line, "://"); idx != -1 {
+			// 提取前缀（包括 "://"）
+			prefix := line[:idx+3]
+			// 从 map 中获取对应的解析器
+			if parser, ok := sm.parsers[prefix]; ok {
+				parsedServer, err = parser.Parse(line)
 			}
-
-			// 解析JSON - 包含所有字段
-			var vmessConfig struct {
-				V    string `json:"v"`    // 版本
-				Ps   string `json:"ps"`   // 备注/名称
-				Add  string `json:"add"`  // 地址
-				Port string `json:"port"` // 端口（字符串类型）
-				Id   string `json:"id"`   // UUID
-				Aid  string `json:"aid"`  // AlterID（字符串类型，可能是 "0"）
-				Net  string `json:"net"`  // 传输协议: tcp, kcp, ws, h2, quic, grpc
-				Type string `json:"type"` // 伪装类型: none, http, srtp, utp, wechat-video
-				Host string `json:"host"` // 伪装域名
-				Path string `json:"path"` // 路径
-				Tls  string `json:"tls"`  // TLS: "" 或 "tls"
-			}
-
-			decodedStr := string(decoded)
-
-			if err := json.Unmarshal(decoded, &vmessConfig); err != nil {
-				fmt.Printf("解析 VMess JSON 失败: %v, 内容: %s\n", err, decodedStr)
-				continue
-			}
-
-			// 将port转换为整数
-			port, err := strconv.Atoi(vmessConfig.Port)
-			if err != nil {
-				fmt.Printf("解析端口失败: %v, 端口值: %s\n", err, vmessConfig.Port)
-				continue
-			}
-
-			// 将aid转换为整数
-			aid := 0
-			if vmessConfig.Aid != "" {
-				if aidInt, err := strconv.Atoi(vmessConfig.Aid); err == nil {
-					aid = aidInt
-				}
-			}
-
-			// 生成服务器ID（使用 addr:port:uuid）
-			serverID := server.GenerateServerID(vmessConfig.Add, port, vmessConfig.Id)
-
-			// 创建服务器配置，包含所有字段
-			s := config.Server{
-				ID:           serverID,
-				Name:         vmessConfig.Ps,
-				Addr:         vmessConfig.Add,
-				Port:         port,
-				Username:     vmessConfig.Id, // VMess 使用 UUID 作为标识
-				Password:     "",
-				Delay:        0,
-				Selected:     false,
-				Enabled:      true,
-				ProtocolType: "vmess",
-				// VMess 协议字段
-				VMessVersion:  vmessConfig.V,
-				VMessUUID:     vmessConfig.Id,
-				VMessAlterID:  aid,
-				VMessSecurity: "auto", // 默认加密方式
-				VMessNetwork:  vmessConfig.Net,
-				VMessType:     vmessConfig.Type,
-				VMessHost:     vmessConfig.Host,
-				VMessPath:     vmessConfig.Path,
-				VMessTLS:      vmessConfig.Tls,
-				// 保存原始配置 JSON
-				RawConfig: decodedStr,
-			}
-
-			// 如果名称为空，使用地址:端口作为名称
-			if s.Name == "" {
-				s.Name = fmt.Sprintf("%s:%d", s.Addr, s.Port)
-			}
-
-			servers = append(servers, s)
-			continue
 		}
 
-		// 尝试解析SSR/SS格式
-		if strings.HasPrefix(line, "ssr://") || strings.HasPrefix(line, "ss://") {
-			// SSR/SS格式，暂时不支持
-			continue
+		// 如果没有找到解析器或解析失败，尝试使用 SimpleParser
+		if parsedServer == nil {
+			simpleParser := &SimpleParser{}
+			parsedServer, err = simpleParser.Parse(line)
 		}
 
-		// 尝试解析SOCKS5格式
-		// 格式: socks5://username:password@addr:port
-		socks5Regex := regexp.MustCompile(`^socks5://(?:([^:]+):([^@]+)@)?([^:]+):(\d+)$`)
-		matches := socks5Regex.FindStringSubmatch(line)
-		if matches != nil {
-			port, _ := strconv.Atoi(matches[4])
-			s := config.Server{
-				ID:           server.GenerateServerID(matches[3], port, matches[1]),
-				Name:         fmt.Sprintf("%s:%d", matches[3], port),
-				Addr:         matches[3],
-				Port:         port,
-				Username:     matches[1],
-				Password:     matches[2],
-				Delay:        0,
-				Selected:     false,
-				Enabled:      true,
-				ProtocolType: "socks5",
-				RawConfig:    line,
-			}
-			servers = append(servers, s)
-			continue
-		}
-
-		// 尝试简单格式: addr:port username password
-		simpleRegex := regexp.MustCompile(`^([^:]+):(\d+)\s+([^\s]+)\s+([^\s]+)$`)
-		matches = simpleRegex.FindStringSubmatch(line)
-		if matches != nil {
-			port, _ := strconv.Atoi(matches[2])
-			s := config.Server{
-				ID:           server.GenerateServerID(matches[1], port, matches[3]),
-				Name:         fmt.Sprintf("%s:%d", matches[1], port),
-				Addr:         matches[1],
-				Port:         port,
-				Username:     matches[3],
-				Password:     matches[4],
-				Delay:        0,
-				Selected:     false,
-				Enabled:      true,
-				ProtocolType: "socks5", // 简单格式默认为 SOCKS5
-				RawConfig:    line,
-			}
-			servers = append(servers, s)
+		// 如果解析成功，添加到服务器列表
+		if parsedServer != nil {
+			servers = append(servers, *parsedServer)
 		}
 	}
 

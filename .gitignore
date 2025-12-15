@@ -20,6 +20,8 @@ myproxy
 coverage.html
 coverage.txt
 *.coverprofile
+test/
+
 
 # Go 依赖管理
 vendor/
