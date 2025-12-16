@@ -40,8 +40,7 @@ func main() {
 
 	// 初始化应用（创建Fyne应用和窗口）
 	appState.InitApp()
-	// 设置应用图标（使用内置默认黑色占位图标）
-	appState.App.SetIcon(appIcon)
+	// 应用将使用Fyne默认图标
 
 	// 创建主窗口（此时LogsPanel已创建）
 	mainWindow := ui.NewMainWindow(appState)

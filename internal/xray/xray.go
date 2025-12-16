@@ -111,12 +111,12 @@ func (lw *logWriter) processLogLine(line string) {
 
 // XrayInstance 封装 xray-core 实例
 type XrayInstance struct {
-	instance   *core.Instance
-	ctx        context.Context
-	cancel     context.CancelFunc
-	isRunning  bool        // 运行状态
-	port       int         // 监听端口
-	logWriter  *logWriter  // 日志写入器
+	instance    *core.Instance
+	ctx         context.Context
+	cancel      context.CancelFunc
+	isRunning   bool        // 运行状态
+	port        int         // 监听端口
+	logWriter   *logWriter  // 日志写入器
 	logCallback LogCallback // 日志回调函数
 }
 
@@ -343,6 +343,86 @@ func CreateOutboundFromServer(server *config.Server) (map[string]interface{}, er
 			"streamSettings": streamSettings,
 		}
 
+	case "ss":
+		// 创建 Shadowsocks 出站配置
+		ssConfig := map[string]interface{}{
+			"servers": []map[string]interface{}{
+				{
+					"address":  server.Addr,
+					"port":     server.Port,
+					"method":   server.SSMethod,
+					"password": server.Password,
+				},
+			},
+		}
+
+		// 构建 streamSettings（传输协议配置）
+		streamSettings := buildSSStreamSettings(server)
+
+		outbound = map[string]interface{}{
+			"tag":            "proxy",
+			"protocol":       "shadowsocks",
+			"settings":       ssConfig,
+			"streamSettings": streamSettings,
+		}
+
+		// 添加插件配置（如果有）
+		if server.SSPlugin != "" {
+			ssConfig["servers"].([]map[string]interface{})[0]["plugin"] = server.SSPlugin
+			if server.SSPluginOpts != "" {
+				ssConfig["servers"].([]map[string]interface{})[0]["plugin_opts"] = server.SSPluginOpts
+			}
+		}
+
+	case "trojan":
+		// 创建 Trojan 出站配置
+		// 默认使用 TLS
+		security := "tls"
+		tlsSettings := map[string]interface{}{
+			"allowInsecure": server.TrojanAllowInsecure,
+		}
+
+		// 设置 SNI
+		if server.TrojanSNI != "" {
+			tlsSettings["serverName"] = server.TrojanSNI
+		}
+
+		// 设置 ALPN
+		if server.TrojanAlpn != "" {
+			// ALPN 应该是字符串数组
+			alpnArray := []string{}
+			for _, alpn := range strings.Split(server.TrojanAlpn, ",") {
+				if alpn = strings.TrimSpace(alpn); alpn != "" {
+					alpnArray = append(alpnArray, alpn)
+				}
+			}
+			if len(alpnArray) > 0 {
+				tlsSettings["alpn"] = alpnArray
+			}
+		}
+
+		streamSettings := map[string]interface{}{
+			"security":    security,
+			"tlsSettings": tlsSettings,
+		}
+
+		trojanConfig := map[string]interface{}{
+			"servers": []map[string]interface{}{
+				{
+					"address":  server.Addr,
+					"port":     server.Port,
+					"password": server.TrojanPassword,
+				},
+			},
+		}
+
+		outbound = map[string]interface{}{
+			"tag":            "proxy",
+			"protocol":       "trojan",
+			"settings":       trojanConfig,
+			"streamSettings": streamSettings,
+		}
+
 	default:
 		return nil, fmt.Errorf("不支持的协议类型: %s", server.ProtocolType)
 	}
@@ -423,6 +503,20 @@ func getVMessNetwork(network string) string {
 	return network
 }
 
+// buildSSStreamSettings 构建 Shadowsocks 传输协议配置
+func buildSSStreamSettings(server *config.Server) map[string]interface{} {
+	// 默认使用 tcp
+	network := "tcp"
+	streamSettings := map[string]interface{}{
+		"network": network,
+	}
+
+	// 目前 Shadowsocks 主要使用 tcp
+	// 如果需要更复杂的配置，可以根据实际需求扩展
+
+	return streamSettings
+}
+
 // CreateXrayConfig 创建完整的 xray 配置
 // localPort: 本地 SOCKS5 监听端口（默认 10080）
 // server: 服务器配置，用于创建出站配置
@@ -453,7 +547,7 @@ func CreateXrayConfig(localPort int, server *config.Server, logFilePath ...strin
 	logConfig := map[string]interface{}{
 		"loglevel": "debug", // 使用 debug 级别以便输出所有日志
 	}
-	
+
 	// 如果提供了日志文件路径，设置日志输出到文件
 	if len(logFilePath) > 0 && logFilePath[0] != "" {
 		logConfig["error"] = logFilePath[0]

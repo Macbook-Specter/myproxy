@@ -77,9 +77,21 @@ func (sm *ServerManager) GetServer(id string) (*config.Server, error) {
 	return sm.config.GetServer(id)
 }
 
-// ListServers 获取所有服务器
+// ListServers 获取当前选中订阅的服务器列表
 func (sm *ServerManager) ListServers() []config.Server {
-	return sm.config.Servers
+	// 如果未选择订阅或选择了全部订阅（ID为0），返回所有服务器
+	if sm.config.SelectedSubscriptionID == 0 {
+		return sm.config.Servers
+	}
+	
+	// 否则返回指定订阅下的服务器
+	servers, err := sm.GetServersBySubscriptionID(sm.config.SelectedSubscriptionID)
+	if err != nil {
+		// 如果获取失败，返回所有服务器作为后备
+		return sm.config.Servers
+	}
+	
+	return servers
 }
 
 // SelectServer 选择服务器
@@ -90,6 +102,27 @@ func (sm *ServerManager) SelectServer(id string) error {
 // GetSelectedServer 获取当前选中的服务器
 func (sm *ServerManager) GetSelectedServer() (*config.Server, error) {
 	return sm.config.GetSelectedServer()
+}
+
+// GetSelectedSubscriptionID 获取当前选中的订阅ID
+func (sm *ServerManager) GetSelectedSubscriptionID() int64 {
+	return sm.config.SelectedSubscriptionID
+}
+
+// SetSelectedSubscriptionID 设置当前选中的订阅ID
+func (sm *ServerManager) SetSelectedSubscriptionID(subscriptionID int64) {
+	sm.config.SelectedSubscriptionID = subscriptionID
+}
+
+// GetServersBySubscriptionID 根据订阅ID获取服务器列表
+func (sm *ServerManager) GetServersBySubscriptionID(subscriptionID int64) ([]config.Server, error) {
+	// 从数据库获取指定订阅下的服务器
+	servers, err := database.GetServersBySubscriptionID(subscriptionID)
+	if err != nil {
+		return nil, fmt.Errorf("获取订阅服务器列表失败: %w", err)
+	}
+
+	return servers, nil
 }
 
 // UpdateServer 更新服务器信息
