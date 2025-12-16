@@ -1,9 +1,14 @@
 package ui
 
 import (
+	"fmt"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
+	"myproxy.com/p/internal/logging"
+	"myproxy.com/p/internal/systemproxy"
 )
 
 // StatusPanel 显示代理状态、端口和当前服务器信息。
@@ -13,6 +18,8 @@ type StatusPanel struct {
 	proxyStatusLabel *widget.Label
 	portLabel        *widget.Label
 	serverNameLabel  *widget.Label
+	proxyModeSelect  *widget.Select
+	systemProxy      *systemproxy.SystemProxy
 }
 
 // NewStatusPanel 创建并初始化状态信息面板。
@@ -60,6 +67,16 @@ func NewStatusPanel(appState *AppState) *StatusPanel {
 	}
 	sp.serverNameLabel.Wrapping = fyne.TextWrapOff
 
+	// 创建系统代理管理器（默认使用 localhost:10080）
+	sp.systemProxy = systemproxy.NewSystemProxy("127.0.0.1", 10080)
+
+	// 创建系统代理设置下拉框
+	sp.proxyModeSelect = widget.NewSelect(
+		[]string{"清除系统代理", "自动配置系统代理", "环境变量代理"},
+		sp.onProxyModeChanged,
+	)
+	sp.proxyModeSelect.PlaceHolder = "系统代理设置"
+
 	return sp
 }
 
@@ -68,12 +85,16 @@ func NewStatusPanel(appState *AppState) *StatusPanel {
 func (sp *StatusPanel) Build() fyne.CanvasObject {
 	// 使用水平布局显示所有信息，所有元素横向排列
 	// 使用 HBox 布局，元素从左到右排列，保持最小尺寸
+	// 添加 Spacer 将下拉框推到最右边
 	statusArea := container.NewHBox(
 		sp.proxyStatusLabel,
 		widget.NewSeparator(), // 分隔符
 		sp.portLabel,
 		widget.NewSeparator(), // 分隔符
 		sp.serverNameLabel,
+		layout.NewSpacer(),    // Spacer，将下拉框推到最右边
+		widget.NewSeparator(), // 分隔符
+		sp.proxyModeSelect,    // 系统代理设置下拉框（最右边）
 	)
 
 	// 使用 Border 布局，顶部添加分隔线，确保区域可见
@@ -97,4 +118,109 @@ func (sp *StatusPanel) Refresh() {
 	if sp.appState != nil {
 		sp.appState.UpdateProxyStatus()
 	}
+	// 更新系统代理管理器的端口
+	sp.updateSystemProxyPort()
+}
+
+// updateSystemProxyPort 更新系统代理管理器的端口
+func (sp *StatusPanel) updateSystemProxyPort() {
+	if sp.appState == nil || sp.appState.Config == nil {
+		return
+	}
+
+	// 从配置或 xray 实例获取端口
+	proxyPort := 10080 // 默认端口
+	if sp.appState.XrayInstance != nil && sp.appState.XrayInstance.IsRunning() {
+		if port := sp.appState.XrayInstance.GetPort(); port > 0 {
+			proxyPort = port
+		}
+	} else if sp.appState.Config.AutoProxyPort > 0 {
+		proxyPort = sp.appState.Config.AutoProxyPort
+	}
+
+	// 更新系统代理管理器
+	sp.systemProxy = systemproxy.NewSystemProxy("127.0.0.1", proxyPort)
+}
+
+// onProxyModeChanged 处理系统代理模式改变
+func (sp *StatusPanel) onProxyModeChanged(selected string) {
+	if sp.appState == nil {
+		return
+	}
+
+	// 更新系统代理端口
+	sp.updateSystemProxyPort()
+
+	var err error
+	var logMessage string
+
+	switch selected {
+	case "清除系统代理":
+		// 清除系统代理
+		err = sp.systemProxy.ClearSystemProxy()
+		// 同时清除环境变量代理，避免污染环境
+		terminalErr := sp.systemProxy.ClearTerminalProxy()
+		if err == nil && terminalErr == nil {
+			logMessage = "已清除系统代理设置和环境变量代理"
+		} else if err != nil && terminalErr != nil {
+			logMessage = fmt.Sprintf("清除系统代理失败: %v; 清除环境变量代理失败: %v", err, terminalErr)
+			err = fmt.Errorf("清除失败: %v; %v", err, terminalErr)
+		} else if err != nil {
+			logMessage = fmt.Sprintf("清除系统代理失败: %v; 已清除环境变量代理", err)
+		} else {
+			logMessage = fmt.Sprintf("已清除系统代理设置; 清除环境变量代理失败: %v", terminalErr)
+			err = terminalErr
+		}
+
+	case "自动配置系统代理":
+		err = sp.systemProxy.SetSystemProxy()
+		if err == nil {
+			proxyPort := 10080
+			if sp.appState.XrayInstance != nil && sp.appState.XrayInstance.IsRunning() {
+				if port := sp.appState.XrayInstance.GetPort(); port > 0 {
+					proxyPort = port
+				}
+			} else if sp.appState.Config != nil && sp.appState.Config.AutoProxyPort > 0 {
+				proxyPort = sp.appState.Config.AutoProxyPort
+			}
+			logMessage = fmt.Sprintf("已自动配置系统代理: 127.0.0.1:%d", proxyPort)
+		} else {
+			logMessage = fmt.Sprintf("自动配置系统代理失败: %v", err)
+		}
+
+	case "环境变量代理":
+		// 先清除之前的终端代理设置
+		_ = sp.systemProxy.ClearTerminalProxy()
+		// 设置新的终端代理
+		err = sp.systemProxy.SetTerminalProxy()
+		if err == nil {
+			proxyPort := 10080
+			if sp.appState.XrayInstance != nil && sp.appState.XrayInstance.IsRunning() {
+				if port := sp.appState.XrayInstance.GetPort(); port > 0 {
+					proxyPort = port
+				}
+			} else if sp.appState.Config != nil && sp.appState.Config.AutoProxyPort > 0 {
+				proxyPort = sp.appState.Config.AutoProxyPort
+			}
+			logMessage = fmt.Sprintf("已设置环境变量代理: socks5://127.0.0.1:%d (已写入shell配置文件)", proxyPort)
+		} else {
+			logMessage = fmt.Sprintf("设置环境变量代理失败: %v", err)
+		}
+	}
+
+	// 输出日志到日志区域
+	if err == nil {
+		sp.appState.AppendLog("INFO", "app", logMessage)
+		if sp.appState.Logger != nil {
+			sp.appState.Logger.InfoWithType(logging.LogTypeApp, logMessage)
+		}
+	} else {
+		sp.appState.AppendLog("ERROR", "app", logMessage)
+		if sp.appState.Logger != nil {
+			sp.appState.Logger.Error(logMessage)
+		}
+	}
+
+	// 重置下拉框选择（因为这是操作选择，不是状态选择）
+	sp.proxyModeSelect.SetSelected("")
 }
