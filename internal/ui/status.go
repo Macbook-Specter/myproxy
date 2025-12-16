@@ -7,8 +7,22 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
+	"myproxy.com/p/internal/database"
 	"myproxy.com/p/internal/logging"
 	"myproxy.com/p/internal/systemproxy"
+)
+
+// 系统代理模式常量定义
+const (
+	// 完整模式名称
+	SystemProxyModeClear      = "清除系统代理"
+	SystemProxyModeAuto       = "自动配置系统代理"
+	SystemProxyModeTerminal   = "环境变量代理"
+
+	// 简短模式名称（用于UI显示）
+	SystemProxyModeShortClear    = "清除"
+	SystemProxyModeShortAuto     = "系统"
+	SystemProxyModeShortTerminal = "终端"
 )
 
 // StatusPanel 显示代理状态、端口和当前服务器信息。
@@ -70,12 +84,20 @@ func NewStatusPanel(appState *AppState) *StatusPanel {
 	// 创建系统代理管理器（默认使用 localhost:10080）
 	sp.systemProxy = systemproxy.NewSystemProxy("127.0.0.1", 10080)
 
-	// 创建系统代理设置下拉框
+	// 创建系统代理设置下拉框（只读，用于显示当前状态，不绑定 change 事件）
+	// 选项使用简短文本显示，但在内部映射到完整功能
 	sp.proxyModeSelect = widget.NewSelect(
-		[]string{"清除系统代理", "自动配置系统代理", "环境变量代理"},
-		sp.onProxyModeChanged,
+		[]string{
+			SystemProxyModeShortClear,
+			SystemProxyModeShortAuto,
+			SystemProxyModeShortTerminal,
+		},
+		nil, // 不绑定 change 事件，只在启动时恢复状态
 	)
 	sp.proxyModeSelect.PlaceHolder = "系统代理设置"
+
+	// 恢复系统代理状态（在应用启动时）
+	sp.restoreSystemProxyState()
 
 	return sp
 }
@@ -142,10 +164,38 @@ func (sp *StatusPanel) updateSystemProxyPort() {
 	sp.systemProxy = systemproxy.NewSystemProxy("127.0.0.1", proxyPort)
 }
 
-// onProxyModeChanged 处理系统代理模式改变
-func (sp *StatusPanel) onProxyModeChanged(selected string) {
+// getFullModeName 将简短文本映射到完整的功能名称
+func (sp *StatusPanel) getFullModeName(shortText string) string {
+	switch shortText {
+	case SystemProxyModeShortClear:
+		return SystemProxyModeClear
+	case SystemProxyModeShortAuto:
+		return SystemProxyModeAuto
+	case SystemProxyModeShortTerminal:
+		return SystemProxyModeTerminal
+	default:
+		return shortText
+	}
+}
+
+// getShortModeName 将完整的功能名称映射到简短文本
+func (sp *StatusPanel) getShortModeName(fullName string) string {
+	switch fullName {
+	case SystemProxyModeClear:
+		return SystemProxyModeShortClear
+	case SystemProxyModeAuto:
+		return SystemProxyModeShortAuto
+	case SystemProxyModeTerminal:
+		return SystemProxyModeShortTerminal
+	default:
+		return ""
+	}
+}
+
+// applySystemProxyMode 应用系统代理模式（在启动时调用）
+func (sp *StatusPanel) applySystemProxyMode(fullModeName string) error {
 	if sp.appState == nil {
-		return
+		return fmt.Errorf("appState 未初始化")
 	}
 
 	// 更新系统代理端口
@@ -154,8 +204,8 @@ func (sp *StatusPanel) onProxyModeChanged(selected string) {
 	var err error
 	var logMessage string
 
-	switch selected {
-	case "清除系统代理":
+	switch fullModeName {
+	case SystemProxyModeClear:
 		// 清除系统代理
 		err = sp.systemProxy.ClearSystemProxy()
 		// 同时清除环境变量代理，避免污染环境
@@ -172,7 +222,11 @@ func (sp *StatusPanel) onProxyModeChanged(selected string) {
 			err = terminalErr
 		}
 
-	case "自动配置系统代理":
+	case SystemProxyModeAuto:
+		// 先清除之前的代理设置，再设置新的
+		_ = sp.systemProxy.ClearSystemProxy()
+		_ = sp.systemProxy.ClearTerminalProxy()
+		// 然后设置系统代理
 		err = sp.systemProxy.SetSystemProxy()
 		if err == nil {
 			proxyPort := 10080
@@ -188,10 +242,11 @@ func (sp *StatusPanel) onProxyModeChanged(selected string) {
 			logMessage = fmt.Sprintf("自动配置系统代理失败: %v", err)
 		}
 
-	case "环境变量代理":
-		// 先清除之前的终端代理设置
+	case SystemProxyModeTerminal:
+		// 先清除之前的代理设置
+		_ = sp.systemProxy.ClearSystemProxy()
 		_ = sp.systemProxy.ClearTerminalProxy()
-		// 设置新的终端代理
+		// 然后设置环境变量代理
 		err = sp.systemProxy.SetTerminalProxy()
 		if err == nil {
 			proxyPort := 10080
@@ -221,6 +276,35 @@ func (sp *StatusPanel) onProxyModeChanged(selected string) {
 		}
 	}
 
-	// 重置下拉框选择（因为这是操作选择，不是状态选择）
-	sp.proxyModeSelect.SetSelected("")
+	return err
+}
+
+// saveSystemProxyState 保存系统代理状态到数据库
+func (sp *StatusPanel) saveSystemProxyState(mode string) {
+	if err := database.SetAppConfig("systemProxyMode", mode); err != nil {
+		if sp.appState != nil && sp.appState.Logger != nil {
+			sp.appState.Logger.Error("保存系统代理状态失败: %v", err)
+		}
+	}
+}
+
+// restoreSystemProxyState 从数据库恢复系统代理状态（在应用启动时调用）
+func (sp *StatusPanel) restoreSystemProxyState() {
+	// 从数据库读取保存的系统代理模式
+	mode, err := database.GetAppConfig("systemProxyMode")
+	if err != nil || mode == "" {
+		// 如果没有保存的状态，不执行任何操作
+		return
+	}
+
+	// 应用系统代理模式
+	restoreErr := sp.applySystemProxyMode(mode)
+
+	// 更新下拉框显示文本（使用简短文本）
+	if restoreErr == nil {
+		shortText := sp.getShortModeName(mode)
+		if shortText != "" {
+			sp.proxyModeSelect.SetSelected(shortText)
+		}
+	}
 }
